@@ -1,0 +1,12 @@
+docker run --gpus all \
+  --ipc=host \
+  --network=host \
+  --rm \
+  --name qwen2.5-omni \
+  -it \
+  -e HTTP_PROXY="http://127.0.0.1:8080" \
+  -e HTTPS_PROXY="http://127.0.0.1:8080" \
+  -e NO_PROXY="localhost,127.0.0.1,.localdomain.com" \
+  qwenllm/qwen-omni:2.5-cu121 \
+  bash
+

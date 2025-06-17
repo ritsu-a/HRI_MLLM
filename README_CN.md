@@ -1,6 +1,6 @@
 # Qwen2.5-Omni
 <p align="left">
-        <a href="README_CN.md">中文</a> &nbsp｜ &nbsp English&nbsp&nbsp
+        中文</a>&nbsp ｜ &nbsp<a href="README.md">English</a>
 </p>
 <br>
 
@@ -11,83 +11,82 @@
 <p align="center">
         💜 <a href="https://chat.qwenlm.ai/"><b>Qwen Chat</b></a>&nbsp&nbsp | &nbsp&nbsp🤗 <a href="https://huggingface.co/collections/Qwen/qwen25-omni-67de1e5f0f9464dc6314b36e">Hugging Face</a>&nbsp&nbsp | &nbsp&nbsp🤖 <a href="https://modelscope.cn/collections/Qwen25-Omni-a2505ce0d5514e">ModelScope</a>&nbsp&nbsp | &nbsp&nbsp📑 <a href="https://qwenlm.github.io/blog/qwen2.5-omni/">Blog</a>&nbsp&nbsp | &nbsp&nbsp📚 <a href="https://github.com/QwenLM/Qwen2.5-Omni/tree/main/cookbooks">Cookbooks</a>&nbsp&nbsp | &nbsp&nbsp📑 <a href="https://arxiv.org/abs/2503.20215">Paper</a>&nbsp&nbsp
 <br>
-🖥️ <a href="https://huggingface.co/spaces/Qwen/Qwen2.5-Omni-7B-Demo ">Demo</a>&nbsp&nbsp | &nbsp&nbsp💬 <a href="https://github.com/QwenLM/Qwen/blob/main/assets/wechat.png">WeChat (微信)</a>&nbsp&nbsp | &nbsp&nbsp🫨 <a href="https://discord.gg/CV4E9rpNSD">Discord</a>&nbsp&nbsp | &nbsp&nbsp📑 <a href="https://help.aliyun.com/zh/model-studio/user-guide/qwen-omni">API</a>
+🖥️ <a href="https://modelscope.cn/studios/Qwen/Qwen2.5-Omni-Demo">Demo</a>&nbsp&nbsp | &nbsp&nbsp💬 <a href="https://github.com/QwenLM/Qwen/blob/main/assets/wechat.png">WeChat (微信)</a>&nbsp&nbsp | &nbsp&nbsp🫨 <a href="https://discord.gg/CV4E9rpNSD">Discord</a>&nbsp&nbsp | &nbsp&nbsp📑 <a href="https://help.aliyun.com/zh/model-studio/user-guide/qwen-omni">API</a>
 <!-- &nbsp&nbsp | &nbsp&nbsp🖥️ <a href="https://gallery.pai-ml.com/#/preview/deepLearning/cv/qwen2.5-vl">PAI-DSW</a> -->
 </p>
 
-We release **Qwen2.5-Omni**, the new flagship end-to-end multimodal model in the Qwen series. Designed for comprehensive multimodal perception, it seamlessly processes diverse inputs including text, images, audio, and video, while delivering real-time streaming responses through both text generation and natural speech synthesis. Let's click the video below for more information 😃
+**Qwen2.5-Omni**正式发布了！这是Qwen系列中全新的旗舰级端到端多模态大模型，专为全面的多模式感知设计，无缝处理包括文本、图像、音频和视频在内的各种输入，同时支持流式的文本生成和自然语音合成输出，让我们点击下方视频了解更多信息吧 😃
 
-<a href="https://youtu.be/yKcANdkRuNI" target="_blank">
+<a href="https://youtu.be/UF55yM67EH0" target="_blank">
   <img src="https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen2.5-Omni/video_cover.png" alt="Open Video"/>
 </a>
 
+## 新闻
+* 2025.06.12: Qwen2.5-Omni-7B在口语理解与推理测评榜单[MMSU](https://arxiv.org/abs/2506.04779)中获得开源模型第一！
+* 2025.06.09: 恭喜Qwen2.5-Omni-7B在音频理解与推理评测榜单[MMAU](https://sakshi113.github.io/mmau_homepage/#leaderboard)中位列第一，在[MMAR](https://github.com/ddlBoJack/MMAR)评测中位列开源模型第一！
+* 2025.05.16: 我们发布了4-bit量化的Qwen2.5-Omni-7B（GPTQ-Int4/AWQ），它与原始版本保持了相似的性能，同时减少了高达50%+的GPU显存消耗。有关详细信息，请参阅[GPTQ-Int4和AWQ使用](#gptq-int4-和-awq-使用方法)，模型可以从 Hugging Face ([GPTQ-Int4](https://huggingface.co/Qwen/Qwen2.5-Omni-7B-GPTQ-Int4)|[AWQ](https://huggingface.co/Qwen/Qwen2.5-Omni-7B-AWQ)) 和 ModelScope ([GPTQ-Int4](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-7B-GPTQ-Int4)|[AWQ](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-7B-AWQ)) 中获取。
+* 2025.05.13: [MNN Chat App](https://github.com/alibaba/MNN/blob/master/apps/Android/MnnLlmChat/README.md#releases) 目前已经支持Qwen2.5-Omni了, 让我们在端侧设备中体验Qwen2.5-Omni吧！请访问[使用MNN部署](#使用mnn部署 )来获取有关模型内存消耗和推理速度的基准测试的信息。
+* 2025.04.30: 令人激动！我们发布了Qwen2.5-Omni-3B，以便于更多的平台能够运行Qwen2.5-Omni，模型目前可以在[Hugging Face](https://huggingface.co/Qwen/Qwen2.5-Omni-3B)中下载，该模型的[性能指标](#性能指标)信息已经更新，并且可以通过[最小显存占用信息](#最小gpu内存需求)来了解资源需求。为了更好的体验，[transformers](#--transformers-usage)和[vllm](#deployment-with-vllm)代码已经更新，您可以重新拉取最新的[官方镜像](#-docker)来获取他们。
+* 2025.04.11: 我们正式发布了支持音频输出的vllm版本！请从源码或者我们的镜像中来体验。
+* 2025.04.02: ⭐️⭐️⭐️ Qwen2.5-Omni 达到 Hugging Face Trending 榜的 top-1! 
+* 2025.03.29: ⭐️⭐️⭐️ Qwen2.5-Omni 达到 Hugging Face Trending 榜的 top-2! 
+* 2025.03.26: 与Qwen2.5-Omni的实时交互体验已经在 [Qwen Chat](https://chat.qwen.ai/) 上线，欢迎体验!
+* 2025.03.26: 我们发布了 [Qwen2.5-Omni](https://huggingface.co/collections/Qwen/qwen25-omni-67de1e5f0f9464dc6314b36e). 对于更多的信息请访问我们的[博客](https://qwenlm.github.io/zh/blog/qwen2.5-omni/)!
 
-## News
-* 2025.06.12: Qwen2.5-Omni-7B ranked first among open source models in the spoken language understanding and reasoning benchmark [MMSU](https://arxiv.org/abs/2506.04779).
-* 2025.06.09: Congratulations to our open source Qwen2.5-Omni-7B for ranking first in the [MMAU](https://sakshi113.github.io/mmau_homepage/#leaderboard) leaderboard, and first in the [MMAR](https://github.com/ddlBoJack/MMAR) of open source models in the audio understanding and reasoning evaluation!
-* 2025.05.16: We release 4-bit quantized Qwen2.5-Omni-7B (GPTQ-Int4/AWQ) models that maintain comparable performance to the original version on multimodal evaluations while reducing GPU VRAM consumption by over 50%+. See [GPTQ-Int4 and AWQ Usage](#gptq-int4-and-awq-usage) for details, and models can be obtained from Hugging Face ([GPTQ-Int4](https://huggingface.co/Qwen/Qwen2.5-Omni-7B-GPTQ-Int4)|[AWQ](https://huggingface.co/Qwen/Qwen2.5-Omni-7B-AWQ)) and ModelScope ([GPTQ-Int4](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-7B-GPTQ-Int4)|[AWQ](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-7B-AWQ))
-* 2025.05.13: [MNN Chat App](https://github.com/alibaba/MNN/blob/master/apps/Android/MnnLlmChat/README.md#releases) support Qwen2.5-Omni now, let's experience Qwen2.5-Omni on the edge devices! Please refer to [Deployment with MNN](#deployment-with-mnn) for information about memory consumption and inference speed benchmarks.
-* 2025.04.30: Exciting! We We have released Qwen2.5-Omni-3B to enable more platforms to run Qwen2.5-Omni. The model can be downloaded from [Hugging Face](https://huggingface.co/Qwen/Qwen2.5-Omni-3B). The [performance](#performance) of this model is updated, and please refer to [Minimum GPU memory requirements](#minimum-gpu-memory-requirements) for information about resource consumption. And for best experience, [transformers](#--transformers-usage) and [vllm](#deployment-with-vllm) code have update, you can pull the [official docker](#-docker) again to get them.
-* 2025.04.11: We release the new vllm version which support audio ouput now! Please experience it from source or our docker image.
-* 2025.04.02: ⭐️⭐️⭐️ Qwen2.5-Omni reaches top-1 on Hugging Face Trending! 
-* 2025.03.29: ⭐️⭐️⭐️ Qwen2.5-Omni reaches top-2 on Hugging Face Trending! 
-* 2025.03.26: Real-time interaction with Qwen2.5-Omni is available on [Qwen Chat](https://chat.qwen.ai/). Let's start this amazing journey now!
-* 2025.03.26: We have released the [Qwen2.5-Omni](https://huggingface.co/collections/Qwen/qwen25-omni-67de1e5f0f9464dc6314b36e). For more details, please check our [blog](https://qwenlm.github.io/blog/qwen2.5-omni/)!
 
+## 目录 <!-- omit in toc -->
 
-## Contents <!-- omit in toc -->
-
-- [Overview](#overview)
-  - [Introduction](#introduction)
-  - [Key Features](#key-features)
-  - [Model Architecture](#model-architecture)
-  - [Performance](#performance)
-- [Quickstart](#quickstart)
-  - [Transformers Usage](#--transformers-usage)
-  - [ModelScope Usage](#-modelscope-usage)
-  - [GPTQ-Int4 and AWQ Usage](#gptq-int4-and-awq-usage)
-  - [Usage Tips](#usage-tips)
-  - [Cookbooks for More Usage Cases](#cookbooks-for-more-usage-cases)
-  - [API inference](#api-inference)
-  - [Customization Settings](#customization-settings)
-- [Chat with Qwen2.5-Omni](#chat-with-qwen25-omni)
-  - [Online Demo](#online-demo)
-  - [Launch Local Web UI Demo](#launch-local-web-ui-demo)
-  - [Real-Time Interaction](#real-time-interaction)
-- [Deployment with vLLM](#deployment-with-vllm)
-- [Deployment with MNN](#deployment-with-mnn)
+- [概览](#概览)
+  - [简介](#简介)
+  - [主要特点](#主要特点)
+  - [模型结构](#模型结构)
+  - [性能指标](#性能指标)
+- [快速开始](#快速开始)
+  - [Transformers 使用方法](#--transformers-使用方法)
+  - [ModelScope 使用方法](#-modelscope-使用方法)
+  - [GPTQ-Int4 和 AWQ 使用方法](#gptq-int4-和-awq-使用方法)
+  - [使用提示](#使用提示)
+  - [更多使用用例的 Cookbooks](#更多使用用例的-cookbooks)
+  - [API 推理](#api-推理)
+  - [自定义模型设定](#自定义模型设定)
+- [和 Qwen2.5-Omni 对话](#和-qwen25-omni-对话)
+  - [在线演示](#在线演示)
+  - [启动本地网页演示](#启动本地网页演示)
+  - [实时交互](#实时交互)
+- [使用vLLM部署](#使用vLLM部署)
+- [使用MNN部署](#使用mnn部署)
 - [Docker](#-docker)
-<!-- - [Citation](#citation) -->
+<!-- - [引用](#citation) -->
 
-## Overview 
-### Introduction
-Qwen2.5-Omni is an end-to-end multimodal model designed to perceive diverse modalities, including text, images, audio, and video, while simultaneously generating text and natural speech responses in a streaming manner. 
+## 概览
+### 简介
+Qwen 2.5-Omni是一个端到端的多模态大语言模型，旨在感知包括文本、图像、音频和视频在内的多种模态，同时以流式的方式生成文本和自然语音响应。
 
 <p align="center">
     <img src="https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen2.5-Omni/qwen_omni.png" width="80%"/>
 <p>
 
-### Key Features
+### 主要特点
 
-* **Omni and Novel Architecture**: We propose Thinker-Talker architecture, an end-to-end multimodal model designed to perceive diverse modalities, including text, images, audio, and video, while simultaneously generating text and natural speech responses in a streaming manner. We propose a novel position embedding, named TMRoPE (Time-aligned Multimodal RoPE), to synchronize the timestamps of video inputs with audio.
+* **全能创新架构**：我们提出了一种全新的Thinker-Talker架构，这是一种端到端的多模态模型，旨在支持文本/图像/音频/视频的跨模态理解，同时以流式方式生成文本和自然语音响应。我们提出了一种新的位置编码技术，称为TMRoPE（Time-aligned Multimodal RoPE），通过时间轴对齐实现视频与音频输入的精准同步。
 
-* **Real-Time Voice and Video Chat**: Architecture designed for fully real-time interactions, supporting chunked input and immediate output.
+* **实时音视频交互**：架构旨在支持完全实时交互，支持分块输入和即时输出。
 
-* **Natural and Robust Speech Generation**: Surpassing many existing streaming and non-streaming alternatives, demonstrating superior robustness and naturalness in speech generation.
+* **自然流畅的语音生成**：在语音生成的自然性和稳定性方面超越了许多现有的流式和非流式替代方案。
 
-* **Strong Performance Across Modalities**: Exhibiting exceptional performance across all modalities when benchmarked against similarly sized single-modality models. Qwen2.5-Omni outperforms the similarly sized Qwen2-Audio in audio capabilities and achieves comparable performance to Qwen2.5-VL-7B.
+* **全模态性能优势**：在同等规模的单模态模型进行基准测试时，表现出卓越的性能。Qwen2.5-Omni在音频能力上优于类似大小的Qwen2-Audio，并与Qwen2.5-VL-7B保持同等水平。
 
-* **Excellent End-to-End Speech Instruction Following**: Qwen2.5-Omni shows performance in end-to-end speech instruction following that rivals its effectiveness with text inputs, evidenced by benchmarks such as MMLU and GSM8K.
+* **卓越的端到端语音指令跟随能力**：Qwen2.5-Omni在端到端语音指令跟随方面表现出与文本输入处理相媲美的效果，在MMLU通用知识理解和GSM8K数学推理等基准测试中表现优异。
 
-### Model Architecture
+### 模型结构
 
 <p align="center">
     <img src="https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen2.5-Omni/overview.png" width="80%"/>
 <p>
 
-### Performance
+### 性能指标
 
-We conducted a comprehensive evaluation of Qwen2.5-Omni, which demonstrates strong performance across all modalities when compared to similarly sized single-modality models and closed-source models like Qwen2.5-VL-7B, Qwen2-Audio, and Gemini-1.5-pro. In tasks requiring the integration of multiple modalities, such as OmniBench, Qwen2.5-Omni achieves state-of-the-art performance. Furthermore, in single-modality tasks, it excels in areas including speech recognition (Common Voice), translation (CoVoST2), audio understanding (MMAU), image reasoning (MMMU, MMStar), video understanding (MVBench), and speech generation (Seed-tts-eval and subjective naturalness).
+Qwen2.5-Omni在包括图像，音频，音视频等各种模态下的表现都优于类似大小的单模态模型以及封闭源模型，例如Qwen2.5-VL-7B、Qwen2-Audio和Gemini-1.5-pro。在多模态任务OmniBench，Qwen2.5-Omni达到了SOTA的表现。此外，在单模态任务中，Qwen2.5-Omni在多个领域中表现优异，包括语音识别（Common Voice）、翻译（CoVoST2）、音频理解（MMAU）、图像推理（MMMU、MMStar）、视频理解（MVBench）以及语音生成（Seed-tts-eval和主观自然听感）。
 
 <p align="center">
     <img src="https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen2.5-Omni/bar.png"/>
@@ -710,35 +709,33 @@ We conducted a comprehensive evaluation of Qwen2.5-Omni, which demonstrates stro
 | LiveCodeBench<sub>2305-2409</sub> | 24.6      | 16.5       | **28.7**   | 19.9       | 23.9       | 8.3         | 18.9      | 
 </details>
 
-## Quickstart
+## 快速开始
 
-Below, we provide simple examples to show how to use Qwen2.5-Omni with 🤖 ModelScope and 🤗 Transformers.
-
-The codes of Qwen2.5-Omni has been in the latest Hugging face transformers and we advise you to install with command:
+接下来，我们将提供如何在🤖 ModelScope和🤗 Transformers上使用 Qwen2.5-Omni. Qwen2.5-Omni的代码在Hugging Face transformers的最新版本中，您可以直接通过下面的命令安装：
 ```
 pip install transformers==4.52.3
 pip install accelerate
 ```
-or you might encounter the following error:
+否则您可能会遇到以下错误：
 ```
 KeyError: 'qwen2_5_omni'
 ```
-and you can also use our [official docker image](#-docker) to start without building from source.
+或者您也可以使用我们的[官方 docker 镜像](#-docker)来免去从源码构建。
 
-We offer a toolkit to help you handle various types of audio and visual input more conveniently, as if you were using an API. This includes base64, URLs, and interleaved audio, images and videos. You can install it using the following command and make sure your system has `ffmpeg` installed:
+我们提供了一个额外的小工具，它使您可以更方便地像使用API一样处理各种音频和视觉模态的输入，处理您输入中包括base64、URL以及交错的音频、图像和视频的情况。您可以使用以下命令安装此工具包，并确保您的系统安装了`ffmpeg`：
 
 ```bash
-# It's highly recommended to use `[decord]` feature for faster video loading.
+# 非常建议使用`[decord]`特性来获取更快的视频读取速度
 pip install qwen-omni-utils[decord] -U
 ```
 
-If you are not using Linux, you might not be able to install `decord` from PyPI. In that case, you can use `pip install qwen-omni-utils -U` which will fall back to using torchvision for video processing. However, you can still [install decord from source](https://github.com/dmlc/decord?tab=readme-ov-file#install-from-source) to get decord used when loading video.
+如果您未使用Linux操作系统，您可能无法从PyPI安装`decord`。 在这种情况下，您可以使用`pip install qwen-omni-utils -U`，它将回退到使用torchvision进行视频处理。 但是，您仍然可以[从源代码安装decord](https://github.com/dmlc/decord?tab=readme-ov-file#install-from-source)，以在加载视频时使用decord。
 
-We are preparing [cookbooks](https://github.com/QwenLM/Qwen2.5-Omni/tree/main/cookbooks) for many capabilities, including audio understanding, voice chatting, screen recording interaction, video information extracting, omni chatting and more. Welcome to learn more!
+此外，我们还准备了一些 [cookbooks](https://github.com/QwenLM/Qwen2.5-Omni/tree/main/cookbooks) 来进行能力展示, 包括音频理解、语音对话、屏幕录制交互、视频信息提取、多模态对话等等，敬请访问。
 
-### 🤗  Transformers Usage
+### 🤗  Transformers 使用方法
 
-Here we show a code snippet to show you how to use the chat model with `transformers` and `qwen_omni_utils`:
+在这里我们通过一个简单的代码片段来向您展示如何通过`transformers` and `qwen_omni_utils`来使用我们的模型:
 
 ```python
 import soundfile as sf
@@ -749,7 +746,7 @@ from qwen_omni_utils import process_mm_info
 # default: Load the model on the available device(s)
 model = Qwen2_5OmniForConditionalGeneration.from_pretrained("Qwen/Qwen2.5-Omni-7B", torch_dtype="auto", device_map="auto")
 
-# We recommend enabling flash_attention_2 for better acceleration and memory saving.
+# 我们建议启用 flash_attention_2 以获取更快的推理速度以及更低的显存占用.
 # model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
 #     "Qwen/Qwen2.5-Omni-7B",
 #     torch_dtype="auto",
@@ -795,23 +792,23 @@ sf.write(
 )
 ```
 
-#### Minimum GPU memory requirements
+#### 最小GPU内存需求
 
-| Model | Precision | 15(s) Video | 30(s) Video | 60(s) Video |
+| 模型 | 精度 | 15(s) 视频 | 30(s) 视频 | 60(s) 视频 |
 |--------------|-----------| ------------- | ------------- | ------------------ |
-| Qwen-Omni-3B | FP32      | 89.10 GB      | Not Recommend | Not Recommend      |
+| Qwen-Omni-3B | FP32      | 89.10 GB      | 不推荐 | 不推荐      |
 | Qwen-Omni-3B | BF16      | 18.38 GB      | 22.43 GB      | 28.22 GB           |
-| Qwen-Omni-7B | FP32      | 93.56 GB      | Not Recommend | Not Recommend      |
+| Qwen-Omni-7B | FP32      | 93.56 GB      | 不推荐 | 不推荐      |
 | Qwen-Omni-7B | BF16      | 31.11 GB      | 41.85 GB      | 60.19 GB           |
 
-Note: The table above presents the theoretical minimum memory requirements for inference with `transformers` and `BF16` is test with `attn_implementation="flash_attention_2"`. However, in practice, the actual memory usage is typically at least 1.2 times higher. For more information, see the linked resource [here](https://huggingface.co/docs/accelerate/main/en/usage_guides/model_size_estimator). We are currently planning to develop a version that can perform inference with lower resource consumption requirements so that Qwen2.5-Omni can run on most platforms. Stay tuned!
+注意: 上述的表格所展示的只是使用`transformers`进行推理的理论最小值，并且`BF16`的结果是在`attn_implementation="flash_attention_2"`的情况下测试得到的，但是在实际中，内存使用通常比这个值要高至少1.2倍。 有关更多信息，请参阅[这里](https://huggingface.co/docs/accelerate/main/en/usage_guides/model_size_estimator)。并且我们目前已经在规划研发能够在较低资源消耗需求下进行推理的版本，以便于在大多数平台上能够运行Qwen2.5-Omni，敬请期待！
 
 <details>
-<summary>Video URL resource usage</summary>
+<summary>视频URL超链接使用方法</summary>
 
-Video URL compatibility largely depends on the third-party library version. The details are in the table below. Change the backend by `FORCE_QWENVL_VIDEO_READER=torchvision` or `FORCE_QWENVL_VIDEO_READER=decord` if you prefer not to use the default one.
+视频URL超链接的兼容性取决于第三方库的版本。具体的细节在下表中所示，如果您不希望使用默认值，可以通过设置`FORCE_QWENVL_VIDEO_READER=torchvision`或`FORCE_QWENVL_VIDEO_READER=decord`来实现。
 
-| Backend     | HTTP | HTTPS |
+| 后端类型     | HTTP | HTTPS |
 |-------------|------|-------|
 | torchvision >= 0.19.0 | ✅  | ✅   |
 | torchvision < 0.19.0  | ❌  | ❌   |
@@ -819,9 +816,9 @@ Video URL compatibility largely depends on the third-party library version. The 
 </details>
 
 <details>
-<summary>Batch inference</summary>
+<summary>批处理</summary>
 
-The model can batch inputs composed of mixed samples of various types such as text, images, audio and videos as input when `return_audio=False` is set. Here is an example.
+当`return_audio=False`设置时，模型支持混合输入的批处理，其中可以包含各种类型的样本，如文本、图像、音频和视频，以下是一个代码片段的示例。
 
 ```python
 # Sample messages for batch inference
@@ -913,17 +910,18 @@ print(text)
 </details>
 
 
-### 🤖 ModelScope Usage
-We strongly advise users especially those in mainland China to use ModelScope, `snapshot_download` can help you solve issues concerning downloading checkpoints.
+### 🤖 ModelScope 使用方法
+我们强烈建议中国用户使用ModelScope来获取模型，`snapshot_download`可以解决下载过程中的各种网络问题，详情请参考[ModelScope](https://modelscope.cn/organization/qwen)。
 
-### GPTQ-Int4 and AWQ Usage
+### GPTQ-Int4 和 AWQ 使用方法
 
-To improve the Qwen2.5-Omni-7B's operability on devices with constrained GPU memory, we implemented 4-bit quantization of the Thinker's weights using GPTQ and AWQ, effectively reducing GPU VRAM usage. Ohter key optimizations include:
-* Enhanced the inference pipeline to load model weights on-demand for each module and offload them to CPU memory once inference is complete, preventing peak VRAM usage from becoming excessive.
-* Converted the code2wav module to support streaming inference, thereby avoiding the pre-allocation of excessive GPU memory.
-* Adjusted the ODE solver from a second-order (RK4) to a first-order (Euler) method to further decrease computational overhead.
+为了提高Qwen2.5-Omni-7B在显存有限的平台上运行的的可能性，我们使用GPTQ和AWQ对Thinker权重进行4-bit量化，从而显著减少显存使用量，其他关键优化包括：
 
-These improvements aim to ensure efficient performance of Qwen2.5-Omni across a range of hardware configurations, particularly those with lower GPU memory availability (RTX3080, 4080, 5070, etc). Currently, the relevant models and usage methods can be obtained from Hugging Face ([GPTQ-Int4](https://huggingface.co/Qwen/Qwen2.5-Omni-7B-GPTQ-Int4)|[AWQ](https://huggingface.co/Qwen/Qwen2.5-Omni-7B-AWQ)) and ModelScope ([GPTQ-Int4](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-7B-GPTQ-Int4)|[AWQ](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-7B-AWQ)). As below, we provide simple example to show how to use Qwen2.5-Omni-7B-GPTQ-Int4 with `gptqmodel` as follows:
+* 改善推理流程，根据每个模块的需求来优化模型权重的加载方式，以减少显存使用量
+* 将code2wav模块转换为支持流式推理，从而避免预分配过大的显存。
+* 将ODE求解器从四阶方法改为一阶方法，以减少计算开销
+
+这些提升主要目的是为了确保Qwen2.5-Omni可以运行在一些低显存设备上运行，例如RTX3080、4080、5070等。目前，相关的模型和使用方法可以从Hugging Face ([GPTQ-Int4](https://huggingface.co/Qwen/Qwen2.5-Omni-7B-GPTQ-Int4)|[AWQ](https://huggingface.co/Qwen/Qwen2.5-Omni-7B-AWQ)) 和 ModelScope ([GPTQ-Int4](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-7B-GPTQ-Int4)|[AWQ](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-7B-AWQ))上来获取。下面，我们提供一个简单的示例，以展示如何通过`gptqmodel`来使用Qwen2.5-Omni-7B-GPTQ-Int4模型：
 ```
 pip install transformers==4.52.3
 pip install accelerate
@@ -937,7 +935,7 @@ cd Qwen2.5-Omni/low-VRAM-mode/
 CUDA_VISIBLE_DEVICES=0 python3 low_VRAM_demo_gptq.py
 ```
 
-To use Qwen2.5-Omni-7B-AWQ with `autoawq` please run:
+要通过`autoawq`来使用Qwen2.5-Omni-7B-AWQ with，请执行:
 ```
 pip install transformers==4.52.3
 pip install accelerate
@@ -950,7 +948,7 @@ cd Qwen2.5-Omni/low-VRAM-mode/
 CUDA_VISIBLE_DEVICES=0 python3 low_VRAM_demo_awq.py
 ```
 
-The following two tables present a performance comparison and GPU memory consumption between Qwen2.5-Omni-7B-GPTQ-Int4/Qwen2.5-Omni-7B-AWQ and Qwen2.5-Omni-7B on specific evaluation benchmarks. The data demonstrates that the GPTQ-Int4/AWQ model maintains comparable performance while reducing GPU memory requirements by over 50%+, enabling a broader range of devices to run and experience the high-performance Qwen2.5-Omni-7B model. Notably, the GPTQ-Int4/AWQ variant exhibits slightly slower inference speeds compared to the native Qwen2.5-Omni-7B model due to quantization techniques and CPU offload mechanisms.
+下面的两张表展示了Qwen2.5-Omni-7B-GPTQ-Int4/Qwen2.5-Omni-7B-AWQ 与Qwen2.5-Omni-7B在部分评测集合上的指标对比以及GPU显存占用，从中可以得出，使用GPTQ-Int4/AWQ进行量化后的模型对性能的损失较小，但GPU显存需求降低超过50%+，这使得更多设备能够运行并体验到高性能的Qwen2.5-Omni-7B原版模型。需要注意的是，GPTQ-Int4/AWQ模型在推理速度上与原版模型相比稍慢，这可能是由于量化技术以及CPU offload机制导致的。
 
 | Evaluation Set | Task | Metrics | Qwen2.5-Omni-7B | Qwen2.5-Omni-7B-GPTQ-Int4 | Qwen2.5-Omni-7B-AWQ |
 |--------------|-----------| ------------- | ------------- | ------------------ |  ------------------ |
@@ -968,39 +966,38 @@ The following two tables present a performance comparison and GPU memory consump
 | Qwen-Omni-7B | GPTQ-Int4 | 11.64 GB      | 17.43 GB      | 29.51 GB           |
 | Qwen-Omni-7B | AWQ       | 11.77 GB      | 17.84 GB      | 30.31 GB           |
 
-### Usage Tips
+### 使用提示
 
-#### Prompt for audio output
-If users need audio output, the system prompt must be set as "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech.", otherwise the audio output may not work as expected.
+#### 音频输出的提示词
+如果用户需要音频输出，那么系统提示必须设置为"You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."，否则音频输出可能不会按照预期工作。
 ```
 {
     "role": "system",
     "content": [
-          {"type": "text", "text": "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."}
+        {"type": "text", "text": "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."}
     ]
 }
 ```
-
-#### Use audio in video
-In the process of multimodal interaction, the videos provided by users are often accompanied by audio (such as questions about the content in the video, or sounds generated by certain events in the video). This information is conducive to the model providing a better interactive experience. So we provide the following options for users to decide whether to use audio in video.
+#### 使用视频中的音频
+在多模态交互过程中，用户提供的视频通常伴随着音频（如对视频内容的提问，或者视频中某些事件的声音），这些信息对模型的交互体验很关键。因此，我们提供了以下选项让用户决定是否使用视频中的音频。
 ```python
-# first place, in data preprocessing
+# 第一处，在数据预处理中
 audios, images, videos = process_mm_info(conversations, use_audio_in_video=True)
 ```
 ```python
-# second place, in model processor
+# 第二处，在模型处理中
 inputs = processor(text=text, audio=audios, images=images, videos=videos, return_tensors="pt", 
                    padding=True, use_audio_in_video=True)
 ```
 ```python
-#  third place, in model inference
+# 第三处，在模型推理中
 text_ids, audio = model.generate(**inputs, use_audio_in_video=True)
 ```
-It is worth noting that during a multi-round conversation, the `use_audio_in_video` parameter in these places must be set to the same, otherwise unexpected results will occur.
+值得注意的是，在多轮对话过程中，`use_audio_in_video`参数在这几个地方必须设置为相同的值，否则可能会出现非预期的结果。
 
-#### Use audio output or not
+#### 是否使用音频输出
+模型支持文本和音频输出，如果用户不需要音频输出，可以在模型加载完毕后调用`model.disable_talker()`，此选项将节省约`2GB`的GPU内存，但`generate`函数的`return_audio`选项将只能设置为`False`。
 
-The model supports both text and audio outputs, if users do not need audio outputs, they can call `model.disable_talker()` after init the model. This option will save about `2GB` of GPU memory but the `return_audio` option for `generate` function will only allow to be set at `False`.
 ```python
 model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
     "Qwen/Qwen2.5-Omni-7B",
@@ -1010,7 +1007,7 @@ model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
 model.disable_talker()
 ```
 
-In order to obtain a flexible experience, we recommend that users can decide whether to return audio when `generate` function is called. If `return_audio` is set to `False`, the model will only return text outputs to get text responses faster.
+为了获得灵活的体验，我们建议在调用`generate`函数时根据需要决定是否返回音频。当`return_audio`设置为`False`时，模型将仅返回文本输出以更快地获取文本响应。
 
 ```python
 model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
@@ -1022,15 +1019,16 @@ model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
 text_ids = model.generate(**inputs, return_audio=False)
 ```
 
-#### Change voice type of output audio
-Qwen2.5-Omni supports the ability to change the voice of the output audio. The `"Qwen/Qwen2.5-Omni-7B"` checkpoint supports two voice types as follows:
+#### 修改输出语音的音色类型
+Qwen2.5-Omni 支持修改输出语音的音色类型，`"Qwen/Qwen2.5-Omni-7B"`目前支持两种如下两种音色类型：
 
-| Voice Type | Gender | Description |
+
+| 音色类型 | 性别 | 描述 |
 |------------|--------|-------------|
-| Chelsie    | Female | A honeyed, velvety voice that carries a gentle warmth and luminous clarity.|
-| Ethan      | Male   | A bright, upbeat voice with infectious energy and a warm, approachable vibe.|
+| Chelsie    | 女 | 甜美，温婉，明亮，轻柔|
+| Ethan      | 男   | 阳光，活力，轻快，亲和|
 
-Users can use the `speaker` parameter of `generate` function to specify the voice type. By defalut, if `speaker` is not specified, the default voice type is `Chelsie`.
+用户可以使用`generate`函数的`speaker`参数来指定音色类型。默认情况下，如果没有指定`speaker`，则默认音色类型为`Chelsie`。
 
 ```python
 text_ids, audio = model.generate(**inputs, speaker="Chelsie")
@@ -1040,17 +1038,17 @@ text_ids, audio = model.generate(**inputs, speaker="Chelsie")
 text_ids, audio = model.generate(**inputs, speaker="Ethan")
 ```
 
-#### Flash-Attention 2 to speed up generation
+#### 使用Flash-Attention 2加速生成
 
-First, make sure to install the latest version of Flash Attention 2:
+首先，请确保已安装最新版本的Flash Attention 2：
 
 ```bash
 pip install -U flash-attn --no-build-isolation
 ```
 
-Also, you should have hardware that is compatible with FlashAttention 2. Read more about it in the official documentation of the [flash attention repository](https://github.com/Dao-AILab/flash-attention). FlashAttention-2 can only be used when a model is loaded in `torch.float16` or `torch.bfloat16`.
+当然，您还需要确保您的硬件兼容Flash Attention 2，可以从[官方文档](https://github.com/Dao-AILab/flash-attention)来获取更多信息。FlashAttention-2仅可在模型加载到`torch.float16`或`torch.bfloat16`时使用。
 
-To load and run a model using FlashAttention-2, add `attn_implementation="flash_attention_2"` when loading the model:
+为了加载并运行使用FlashAttention-2的模型，在加载模型时添加`attn_implementation="flash_attention_2"`：
 
 ```python
 from transformers import Qwen2_5OmniForConditionalGeneration
@@ -1064,29 +1062,29 @@ model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
 ```
 
 
-### Cookbooks for More Usage Cases 
+### 更多使用用例的 Cookbooks
 
-| Cookbook | Description | Open |
+| Cookbook | 描述 | 打开 |
 | -------- | ----------- | ---- |
-| [Universal Audio Understanding](https://github.com/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/universal_audio_understanding.ipynb) | Speech recongnition, speech-to-text translation and audio analysis. | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/universal_audio_understanding.ipynb) |
- | [Voice Chatting](https://github.com/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/voice_chatting.ipynb) | Chatting with Qwen2.5-Omni by voice input and output. | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/voice_chatting.ipynb) |
- | [Screen Recording Interaction](https://github.com/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/screen_recording_interaction.ipynb) | Get the information and content you want to know by asking questions in real time on the recording screen. | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/screen_recording_interaction.ipynb) |
- | [Video Information Extracting](https://github.com/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/video_information_extracting.ipynb) | Obtaining information from the video stream. | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/video_information_extracting.ipynb) |
- | [Omni Chatting for Music](https://github.com/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/omni_chatting_for_music.ipynb) | Chat with Qwen2.5-Omni about music content in a audio and video stream. | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/omni_chatting_for_music.ipynb) |
- | [Omni Chatting for Math](https://github.com/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/omni_chatting_for_math.ipynb) | Chat with Qwen2.5-Omni about math content in a audio and video stream. | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/omni_chatting_for_math.ipynb) |
- | [Multi Round Omni Chatting](https://github.com/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/multi_round_omni_chatting.ipynb) | Conducted multiple rounds of audio and video dialogues with Qwen2.5-Omni to provide the most comprehensive ability demonstration. | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/multi_round_omni_chatting.ipynb) |
+| [通用语音理解](https://github.com/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/universal_audio_understanding.ipynb) | 语音识别，语音到文本翻译，音频分析。 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://github.com/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/universal_audio_understanding.ipynb) |
+| [语音对话](https://github.com/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/voice_chatting.ipynb) | 和 Qwen2.5-Omin 通过语音输入和输出对话。 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://github.com/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/voice_chatting.ipynb) |
+| [屏幕录制交互](https://github.com/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/screen_recording_interaction.ipynb) | 从正在实时录制的屏幕中通过提问的方式获取想了解的信息和内容。 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://github.com/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/screen_recording_interaction.ipynb) |
+| [视频信息提取](https://github.com/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/video_information_extracting.ipynb) | 从视频流中获取信息。 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://github.com/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/video_information_extracting.ipynb) |
+| [关于音乐的全模态对话](https://github.com/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/omni_chatting_for_music.ipynb) | 和 Qwen2.5-Omni 通过音视频流的交互方式聊聊关于音乐的话题。 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://github.com/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/omni_chatting_for_music.ipynb) |
+| [关于数学的全模态对话](https://github.com/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/omni_chatting_for_math.ipynb) | 和 Qwen2.5-Omni 通过音视频流的交互方式聊聊关于数学的话题。 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://github.com/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/omni_chatting_for_math.ipynb) |
+| [多轮全模态对话](https://github.com/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/multi_round_omni_chatting.ipynb) |  与 Qwen2.5-Omni 进行了多轮全模态的音视频对话，提供最全面的能力演示。 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://github.com/QwenLM/Qwen2.5-Omni/blob/main/cookbooks/multi_round_omni_chatting.ipynb) |
 
-### API Inference
+### API 推理
 
-To explore Qwen2.5-Omni, we encourage you to test our cutting-edge API service for a faster and efficient experience.
+为了近一步探索 Qwen2.5-Omni，我们鼓励您使用我们的最新 API 服务来获取更快更高效的体验。
 
-#### Installation
+#### 安装
 ```bash
 pip install openai
 ```
 
-#### Examples
-You can use the OpenAI API service to interact with Qwen2.5-Omni like below. And for more usage, please refer to the tutorial at [aliyun](https://help.aliyun.com/zh/model-studio/user-guide/qwen-omni).
+#### 示例
+您可以按照如下的示例使用 OpenAI API 服务与 Qwen2.5-Omni 进行交互，对于更多的使用方法，请参考阿里云的[教程](https://help.aliyun.com/zh/model-studio/user-guide/qwen-omni)。
 ```python
 import base64
 import numpy as np
@@ -1142,9 +1140,10 @@ wav_bytes = base64.b64decode(audio_string)
 wav_array = np.frombuffer(wav_bytes, dtype=np.int16)
 sf.write("output.wav", wav_array, samplerate=24000)
 ```
-### Customization Settings
 
-Since Qwen2.5-Omni does not support prompt settings when using [audio output](#prompt-for-audio-output) (including local deployment and API inference), we suggest that if you need to control the output of the model or modify the personality settings of the model, you can try adding similar content to the conversation template as follows:
+### 自定义模型设定
+
+由于Qwen2.5-Omni在使用[音频输出](#音频输出的提示词)时（包括本地部署和API推理）并不支持prompt的设定，因此我们建议如果您需要对模型的输出进行一定的控制或者对模型的人设等进行修改，可以尝试在对话模板中加入如下类似的设定：
 
 ```python
 conversation = [
@@ -1169,30 +1168,31 @@ conversation = [
 ]
 ```
 
-## Chat with Qwen2.5-Omni
+## 和 Qwen2.5-Omni 对话
 
-### Online Demo
-Without deployment, you can experience online web demo directly by visiting our [Hugginface Spaces](https://huggingface.co/spaces/Qwen/Qwen2.5-Omni-7B-Demo) and [Modelscope Studio](https://modelscope.cn/studios/Qwen/Qwen2.5-Omni-Demo).
+### 在线演示
 
-### Launch Local Web UI Demo
+无需部署，您可以直接访问我们的 [Hugginface Spaces](https://huggingface.co/spaces/Qwen/Qwen2.5-Omni-7B-Demo) 和 [Modelscope 创空间](https://modelscope.cn/studios/Qwen/Qwen2.5-Omni-Demo) 来直接体验在线网页演示。
 
-In this section, we provide instructions for users to build a web-based user interface (UI) demo. This UI demo allows users to interact with a predefined model or application through a web browser. Follow the steps below to get started or you can launch the web demo directly from our [official docker image](#-docker).
+### 启动本地网页演示
 
-#### Installation
+在本节中，我们提供了如何构建一个基于网页的 UI（用户界面）演示的指南，此 UI 演示允许用户通过浏览器与预定义的模型或应用程序进行交互，请按照以下步骤开始使用或您可以直接从我们的[官方 Docker 镜像](#-docker)中启动网页演示。
 
-Before you begin, ensure that you have the required dependencies installed on your system. You can install them by running the following command:
+#### 安装
+
+在您开始之前，请确保已安装所需的依赖项，您可以通过运行以下命令来安装它们：
 
 ```bash
 pip install -r requirements_web_demo.txt
 ```
 
-#### Running the Demo with FlashAttention-2
+#### 基于 FlashAttention-2 启动演示
 
-Once the required packages are installed, you can launch the web demo using the following command. This command will start a web server and provide you with a link to access the UI in your web browser.
+一旦您已安装所需的依赖项，您可以使用以下命令启动网页演示。此命令将启动一个 Web 服务，并提供您用于在 Web 浏览器中访问 UI 的链接。
 
-**Recommended**: For enhanced performance and efficiency, especially in multi-image and video processing scenarios, we strongly recommend using [FlashAttention-2](https://github.com/Dao-AILab/flash-attention). FlashAttention-2 provides significant improvements in memory usage and speed, making it ideal for handling large-scale models and data processing.
+**建议**: 为了获得更好的性能和效率，尤其是处理大量图像和视频的场景下，我们强烈建议使用 [FlashAttention-2](https://github.com/Dao-AILab/flash-attention)。FlashAttention-2 提供了显存使用和速度的显著改进，因此对于处理大型模型和数据处理的场景，它非常合适。
 
-To enable FlashAttention-2, use the following command:
+为了启用 FlashAttention-2，使用如下命令启动演示：
 
 ```bash
 # default for Qwen2.5-Omni-7B
@@ -1203,9 +1203,9 @@ python web_demo.py --flash-attn2
 python web_demo.py --flash-attn2 -c Qwen/Qwen2.5-Omni-3B
 ```
 
-This will load the model with FlashAttention-2 enabled.
+这将会加载模型并启用 FlashAttention-2。
 
-**Default Usage**: If you prefer to run the demo without FlashAttention-2 or if you do not specify the `--flash-attn2` option, the demo will load the model using the standard attention implementation:
+**默认使用方法**: 如果您更希望在不使用 FlashAttention-2 的情况下运行演示，也即不指定`--flash-attn2`参数，此时演示将会使用默认的注意力机制实现方法来加噪和运行模型，您可以使用以下命令：
 
 ```bash
 # default for Qwen2.5-Omni-7B
@@ -1216,24 +1216,25 @@ python web_demo.py
 python web_demo.py -c Qwen/Qwen2.5-Omni-3B
 ```
 
-After running the command, you’ll see a link generated in the terminal similar to this:
+在运行这个命令之后, 您将会在终端中看到类似的输出：
 
 ```
 Running on local: http://127.0.0.1:7860/
 ```
 
-Copy this link and paste it into your browser to access the web UI, where you can interact with the model by inputting text, uploading audios/images/videos, changing voice type or using any other provided functionalities.
+复制该链接，并将其粘贴到浏览器中，即可访问网页演示，在网页中您可以输入文本、上传音频、图像和视频，以及切换输出音色类型等功能。
 
 
-### Real-Time Interaction
-The streaming Real-time interaction with Qwen2.5-Omni is available now, please visit [Qwen Chat](https://chat.qwen.ai/) and select the voice/video calls in the chat box to experience. 
+### 实时交互
+
+实时交互体验目前已经上线，请您访问[Qwen Chat](https://chat.qwen.ai/)，并在聊天框中选择语音/视频通话，即可体验与Qwen2.5-Omni的实时交互。
 
 
-## Deployment with vLLM
+## 使用vLLM部署
 
-We recommend using vLLM for fast Qwen2.5-Omni deployment and inference. You need to install from our provided [source](https://github.com/fyabc/vllm/tree/qwen2_omni_public) to get vLLM support for Qwen2.5-Omni or use our [official docker image](#-docker). You can also check [vLLM official documentation](https://docs.vllm.ai/en/latest/serving/multimodal_inputs.html) for more details about online serving and offline inference.
+我们建议使用vLLM进行Qwen2.5-Omni的快速部署和推理，您需要从我们提供的[源码](https://github.com/fyabc/vllm/tree/qwen2_omni_public)构建vLLM以获取对Qwen2.5-Omni支持，或者使用我们的[官方 docker 镜像](#-docker)。您也可以查看[vLLM官方文档](https://docs.vllm.ai/en/latest/serving/multimodal_inputs.html)以获取在线服务和离线推理的更多信息。
 
-### Installation
+### 安装
 ```bash
 git clone -b qwen2_omni_public https://github.com/fyabc/vllm.git
 cd vllm
@@ -1245,9 +1246,9 @@ pip install .
 pip install transformers==4.52.3
 ```
 
-### Inference Local
+### 本地离线推理
 
-You can use vLLM to inference Qwen2.5-Omni locally, we provide example in [vLLM repo](https://github.com/fyabc/vllm/blob/qwen2_omni_public/examples/offline_inference/qwen2_5_omni/end2end.py) which can generate audio output:
+您可以使用vLLM进行Qwen2.5-Omni的本地推理，我们在vLLM[源码](https://github.com/fyabc/vllm/tree/qwen2_omni_public)中提供了[示例](https://github.com/fyabc/vllm/blob/qwen2_omni_public/examples/offline_inference/qwen2_5_omni/end2end.py)，该示例可以端到端的生成音频。
 
 ```bash
 # git clone -b qwen2_omni_public https://github.com/fyabc/vllm.git
@@ -1268,15 +1269,16 @@ python end2end.py --model Qwen/Qwen2.5-Omni-7B --prompt audio-in-video-v2 --enfo
 python end2end.py --model Qwen/Qwen2.5-Omni-7B --prompt audio-in-video-v2 --enforce-eager --do-wave --voice-type Chelsie --warmup-voice-type Chelsie --thinker-devices [0,1] --talker-devices [2] --code2wav-devices [3] --thinker-gpu-memory-utilization 0.9 --talker-gpu-memory-utilization 0.9 --output-dir output_wav
 ```
 
-### vLLM Serve usage
-You can also use vLLM serve through `pip install vllm>=0.8.5.post1`, and vLLM serve for Qwen2.5-Omni only supports thinker now, meaning only text output is supported. You can start vLLM servev through the following command:
+### 使用vLLM serve
+
+您还可以通过`pip install vllm>=0.8.5.post1`来使用vLLM serve，目前vLLM serve仅支持文本输出。您可以通过以下命令通过vLLM来启动API服务：
 ```bash
 # for single GPU
 vllm serve /path/to/Qwen2.5-Omni-7B/ --port 8000 --host 127.0.0.1 --dtype bfloat16
 # for multi GPUs (example in 4 GPUs)
 vllm serve /path/to/Qwen2.5-Omni-7B/ --port 8000 --host 127.0.0.1 --dtype bfloat16 -tp 4
 ```
-Then you can use the chat API as below (via curl for example):
+然后您可以通过如下代码使用这个API(示例里是使用curl命令):
 ```bash
 curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
@@ -1292,43 +1294,46 @@ curl http://localhost:8000/v1/chat/completions \
     }'
 ```
 
-## Deployment with MNN
 
-Qwen2.5-Omni is now supported in MNN, enabling deployment on edge devices. The MNN models for Qwen2.5-Omni are available for download through Hugging Face ([7B](https://huggingface.co/taobao-mnn/Qwen2.5-Omni-7B-MNN)|[3B](https://huggingface.co/taobao-mnn/Qwen2.5-Omni-3B-MNN)) and ModelScope ([7B](https://modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN)|[3B](https://modelscope.cn/models/MNN/Qwen2.5-Omni-3B-MNN)), along with usage instructions.  For detailed information, you can visit [MNN](https://github.com/alibaba/MNN) to learn about it.
+## 使用MNN部署
 
-The table below shows memory consumption and inference speed benchmarks for the Qwen2.5-Omni MNN implementation across various mobile SoC platforms.
+Qwen2.5-Omni目前已经在MNN框架中支持，以实现在边缘计算设备上的部署，您可以通过Hugging Face ([7B](https://huggingface.co/taobao-mnn/Qwen2.5-Omni-7B-MNN)|[3B](https://huggingface.co/taobao-mnn/Qwen2.5-Omni-3B-MNN)) 或 ModelScope ([7B](https://modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN)|[3B](https://modelscope.cn/models/MNN/Qwen2.5-Omni-3B-MNN))下载Qwen2.5-Omni的MNN模型，并查看使用说明。您还可以访问[MNN](https://github.com/alibaba/MNN)以获取更多信息。
 
-| Platform | Snapdragon 8 Gen 1 | Snapdragon 8 Elite | Snapdragon 8 Gen 1 | Snapdragon 8 Elite  |
+下表展示了Qwen2.5-Omni在MNN框架中，在几种移动SoC平台的内存消耗和推理速度基准测试结果。
+
+
+| 平台 | Snapdragon 8 Gen 1 | Snapdragon 8 Elite | Snapdragon 8 Gen 1 | Snapdragon 8 Elite  |
 |--------------|-----------| ------------- | ------------- | ------------------ |
-| Model Size   | 7B | 7B | 3B | 3B |
-| Memory Peak  | 5.8G | 5.8G | 3.6G | 3.6G |
+| 模型大小   | 7B | 7B | 3B | 3B |
+| 内存峰值  | 5.8G | 5.8G | 3.6G | 3.6G |
 | Thinker Prefill Speed | 25.58 tok/s | 46.32 tok/s | 54.31 tok/s | 55.16 tok/s | 
 | Thinker Decode Speed  |  8.35 tok/s | 11.52 tok/s | 15.84 tok/s | 23.31 tok/s | 
 | Talker Prefill Speed  | 17.21 tok/s | 97.77 tok/s | 34.58 tok/s | 217.82 tok/s| 
 | Talker Decode Speed   | 18.75 tok/s | 38.65 tok/s | 51.90 tok/s | 62.34 tok/s | 
-| Code2Wav Speed         |20.83 tok/s | 27.36 tok/s | 28.45 tok/s | 27.36 tok/s | 
+| Code2wav Speed         |20.83 tok/s | 27.36 tok/s | 28.45 tok/s | 27.36 tok/s | 
 
 
 ## 🐳 Docker
 
-To simplify the deploy process, we provide docker images with pre-build environments: [qwenllm/qwen-omni](https://hub.docker.com/r/qwenllm/qwen-omni). You only need to install the driver and download model files to launch demos.
+为了简化部署过程，我们提供了预构建环境：[qwenllm/qwen-omni](https://hub.docker.com/r/qwenllm/qwen-omni)，您只需要安装驱动并下载模型文件即可启动演示。
 
 ```bash
 docker run --gpus all --ipc=host --network=host --rm --name qwen2.5-omni -it qwenllm/qwen-omni:2.5-cu121 bash
 ```
 
-And you can also launch the web demo by:
+并且您也可以直接通过如下命令启动网页演示:
 ```bash
 bash docker/docker_web_demo.sh --checkpoint /path/to/Qwen2.5-Omni-7B
 ```
-To enable FlashAttention-2, use the following command:
+如需启用FlashAttention-2，请使用如下命令:
 ```bash
 bash docker/docker_web_demo.sh --checkpoint /path/to/Qwen2.5-Omni-7B --flash-attn2
 ```
 
-## Citation
 
-If you find our paper and code useful in your research, please consider giving a star :star: and citation :pencil: :)
+## 引用
+
+如果您在您的研究中感到 Qwen2.5-Omni 为您提供了帮助，期待您能给一个 Star :star: 和引用 :pencil: :)
 
 
 
