@@ -1,0 +1,13 @@
+Install:
+    tested on python=3.10, CUDA=12.1, pytorch=2.6
+
+    pip install -re requirements_web_demo.txt
+    pip install -e .
+
+
+TODO:
+    GPU memory issues
+    inference is too slow 
+    cannot run with 8 gpus
+
+
