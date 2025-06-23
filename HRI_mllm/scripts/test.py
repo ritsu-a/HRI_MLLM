@@ -2,6 +2,7 @@ import soundfile as sf
 
 from HRI_mllm.model.qwen2_5omni import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
 from HRI_mllm.utils.qwen_omni_utils import process_mm_info
+import torch
 
 # default: Load the model on the available device(s)
 # model = Qwen2_5OmniForConditionalGeneration.from_pretrained("Qwen/Qwen2.5-Omni-3B", torch_dtype="auto", device_map="auto")
@@ -9,7 +10,7 @@ from HRI_mllm.utils.qwen_omni_utils import process_mm_info
 # 我们建议启用 flash_attention_2 以获取更快的推理速度以及更低的显存占用.
 model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
     "Qwen/Qwen2.5-Omni-3B",
-    torch_dtype="auto",
+    torch_dtype=torch.bfloat16,
     device_map="auto",
     attn_implementation="flash_attention_2",
 )

@@ -1,0 +1,3 @@
+[submodule "HRI_mllm/external/transformers"]
+	path = HRI_mllm/external/transformers
+	url = git@github.com:huggingface/transformers.git
