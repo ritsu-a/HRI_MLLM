@@ -1,8 +1,13 @@
 Install:
     tested on python=3.10, CUDA=12.1, pytorch=2.6
 
-    pip install -re requirements_web_demo.txt
+    pip install torch=2.6 torchvision=0.21 torchaudio=2.6
+    pip install -re requirements.txt
     pip install -e .
+
+
+Inference:
+    CUDA_VISIBLE_DEVICES=0,1 python HRI_mllm/scripts/test.py
 
 
 TODO:

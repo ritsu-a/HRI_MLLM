@@ -1,7 +1,7 @@
 import soundfile as sf
 
-from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
-from qwen_omni_utils import process_mm_info
+from HRI_mllm.model.qwen2_5omni import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
+from HRI_mllm.utils.qwen_omni_utils import process_mm_info
 
 # default: Load the model on the available device(s)
 # model = Qwen2_5OmniForConditionalGeneration.from_pretrained("Qwen/Qwen2.5-Omni-3B", torch_dtype="auto", device_map="auto")
@@ -44,6 +44,8 @@ inputs = inputs.to(model.device).to(model.dtype)
 text_ids, audio = model.generate(**inputs, use_audio_in_video=USE_AUDIO_IN_VIDEO)
 
 text = processor.batch_decode(text_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+
+import ipdb;ipdb.set_trace()
 print(text)
 sf.write(
     "output.wav",

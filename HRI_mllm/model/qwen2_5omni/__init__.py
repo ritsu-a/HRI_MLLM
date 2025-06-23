@@ -1,0 +1,2 @@
+from .model import Qwen2_5OmniForConditionalGeneration
+from .processor import Qwen2_5OmniProcessor
