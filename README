@@ -6,7 +6,7 @@ Install:
     pip install -e .
 
     cd HRI_mllm/external/HRI_retarget
-    git checkout g1
+    git checkout g1_hri_mllm(maybe not need this line?)
     pip install -e .
 
 

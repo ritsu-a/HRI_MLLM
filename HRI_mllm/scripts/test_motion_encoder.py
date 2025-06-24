@@ -11,6 +11,9 @@ import sys
 
 import pickle
 
+from HRI_mllm.datasets.G1ML3D import G1ML3DDataModule
+
+
 
 
 
@@ -20,25 +23,12 @@ def open_yaml(path):
     return data        
 
 motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "vqvae.yaml"))
-import ipdb;ipdb.set_trace()
-
-
 motion_vae = VQVae(**motion_config)
-
-
-
 state_dict = torch.load(motion_config["ckpt"], map_location="cpu", weights_only=False)
-
 motion_vae.load_state_dict(state_dict, strict=True)
 motion_vae.eval()
 motion_vae.to(device="cuda")
 
-
-motion_repre = motion_vae.decode(torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]).to("cuda"))
-
+dataset = G1ML3DDataModule(cfg=None)
 
 
-
-joints = feats2joints(motion_repre)
-
-ipdb.set_trace()
