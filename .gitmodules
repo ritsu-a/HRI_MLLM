@@ -1,3 +1,6 @@
 [submodule "HRI_mllm/external/transformers"]
 	path = HRI_mllm/external/transformers
 	url = git@github.com:huggingface/transformers.git
+[submodule "HRI_mllm/external/Qwen2-VL-Finetune"]
+	path = HRI_mllm/external/Qwen2-VL-Finetune
+	url = git@github.com:2U1/Qwen2-VL-Finetune.git
