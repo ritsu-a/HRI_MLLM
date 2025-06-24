@@ -4,3 +4,6 @@
 [submodule "HRI_mllm/external/Qwen2-VL-Finetune"]
 	path = HRI_mllm/external/Qwen2-VL-Finetune
 	url = git@github.com:2U1/Qwen2-VL-Finetune.git
+[submodule "HRI_mllm/external/HRI_retarget"]
+	path = HRI_mllm/external/HRI_retarget
+	url = git@github.com:ritsu-a/HRI_retarget.git

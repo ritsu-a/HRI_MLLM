@@ -5,14 +5,18 @@ Install:
     pip install -re requirements.txt
     pip install -e .
 
+    cd HRI_mllm/external/HRI_retarget
+    git checkout g1
+    pip install -e .
+
 
 Inference:
     python HRI_mllm/scripts/test.py
 
 
 TODO:
-    GPU memory issues
     inference is too slow 
-    cannot run with 8 gpus
 
+    monkey-patch qwen2.5omni (or even change the raw class?)
 
+    update and test motion encoder(mostly vae)
