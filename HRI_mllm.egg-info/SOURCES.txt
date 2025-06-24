@@ -1,7 +1,0 @@
-LICENSE
-README
-setup.py
-HRI_mllm.egg-info/PKG-INFO
-HRI_mllm.egg-info/SOURCES.txt
-HRI_mllm.egg-info/dependency_links.txt
-HRI_mllm.egg-info/top_level.txt

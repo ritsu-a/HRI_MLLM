@@ -10,9 +10,9 @@ import modelscope_studio.components.base as ms
 import modelscope_studio.components.antd as antd
 import gradio.processing_utils as processing_utils
 
-from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
+from HRI_mllm.model.qwen2_5omni import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
 from gradio_client import utils as client_utils
-from qwen_omni_utils import process_mm_info
+from HRI_mllm.utils.qwen_omni_utils import process_mm_info
 from argparse import ArgumentParser
 
 def _load_model_processor(args):

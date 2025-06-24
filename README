@@ -7,7 +7,7 @@ Install:
 
 
 Inference:
-    CUDA_VISIBLE_DEVICES=0,1 python HRI_mllm/scripts/test.py
+    python HRI_mllm/scripts/test.py
 
 
 TODO:
