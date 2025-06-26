@@ -13,6 +13,12 @@ Install:
 Inference:
     python HRI_mllm/scripts/test.py
 
+VQVAE:
+    python HRI_mllm/scripts/test_motion_encoder.py
+
+Finetune Qwen2.5 Omni:
+    bash HRI_mllm/scripts/finetune.sh (not done yet)
+
 
 TODO:
     inference is too slow 
@@ -20,3 +26,5 @@ TODO:
     monkey-patch qwen2.5omni (or even change the raw class?)
 
     update and test motion encoder(mostly vae)
+
+    in /root/pengyang/codebase/HRI_MLLM/HRI_mllm/datasets/BaseDataModule.py remove all cfg dependency

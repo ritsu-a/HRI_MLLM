@@ -4,8 +4,7 @@ import numpy as np
 from torch.utils import data
 from rich.progress import track
 from os.path import join as pjoin
-from .dataset_m import MotionDataset
-from .dataset_t2m import Text2MotionDataset
+from .T2M_dataset import Text2MotionDataset
 
 
 class MotionDatasetVQ(Text2MotionDataset):

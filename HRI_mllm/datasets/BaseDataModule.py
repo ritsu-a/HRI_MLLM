@@ -22,8 +22,7 @@ class BASEDataModule(pl.LightningDataModule):
     @property
     def train_dataset(self):
         if self._train_dataset is None:
-            self._train_dataset = self.Dataset(split=self.cfg.TRAIN.SPLIT,
-                                               **self.hparams)
+            self._train_dataset = self.Dataset(**self.hparams)
         return self._train_dataset
 
     @property
@@ -56,8 +55,8 @@ class BASEDataModule(pl.LightningDataModule):
 
     def train_dataloader(self):
         dataloader_options = self.dataloader_options.copy()
-        dataloader_options["batch_size"] = self.cfg.TRAIN.BATCH_SIZE
-        dataloader_options["num_workers"] = self.cfg.TRAIN.NUM_WORKERS
+        dataloader_options["batch_size"] = self.hparams.train_batch_size
+        dataloader_options["num_workers"] = self.hparams.train_workers
         return DataLoader(
             self.train_dataset,
             shuffle=False,

@@ -7,6 +7,9 @@ from HRI_mllm.utils.motion_utils.g1ml3d import (process_file, recover_from_ric)
 from .BaseDataModule import BASEDataModule
 from .T2M_dataset import Text2MotionDataset
 # from .humanml import Text2MotionDatasetEval, Text2MotionDataset, Text2MotionDatasetCB, MotionDataset, MotionDatasetVQ, Text2MotionDatasetToken, Text2MotionDatasetM2T
+from HRI_mllm import DATA_ROOT
+from .MotionDatasetVQ import MotionDatasetVQ
+
 
 def collate_tensors(batch):
     if isinstance(batch[0], np.ndarray):
@@ -69,72 +72,69 @@ def humanml3d_collate(batch):
 
 
 class G1ML3DDataModule(BASEDataModule):
-    def __init__(self, cfg, **kwargs):
+    def __init__(self, **kwargs):
 
         super().__init__(collate_fn=humanml3d_collate)
-        self.cfg = cfg
         self.save_hyperparameters(logger=False)
         
         # Basic info of the dataset
-        cfg.DATASET.JOINT_TYPE = 'g1ml3d'
         self.name = "g1ml3d"
         self.njoints = 41
         
         # Path to the dataset
-        data_root = cfg.DATASET.HUMANML3D.ROOT
+        data_root = pjoin(DATA_ROOT, "G1ML3D")
         self.hparams.data_root = data_root
         self.hparams.text_dir = pjoin(data_root, "texts")
         self.hparams.motion_dir = pjoin(data_root, 'new_joint_vecs')
         
         # Mean and std of the dataset
-        dis_data_root = pjoin(cfg.DATASET.HUMANML3D.MEAN_STD_PATH)
+        dis_data_root = data_root
         self.hparams.mean = np.load(pjoin(dis_data_root, "Mean.npy"))
         self.hparams.std = np.load(pjoin(dis_data_root, "Std.npy"))
         
-        # Mean and std for fair evaluation
-        dis_data_root_eval = pjoin(cfg.DATASET.HUMANML3D.MEAN_STD_PATH, 't2m', "Comp_v6_KLD01", "meta")
-        self.hparams.mean_eval = self.hparams.mean 
-        self.hparams.std_eval = self.hparams.std
         
         # Length of the dataset
-        self.hparams.max_motion_length = cfg.DATASET.HUMANML3D.MAX_MOTION_LEN
-        self.hparams.min_motion_length = cfg.DATASET.HUMANML3D.MIN_MOTION_LEN
-        self.hparams.max_text_len = cfg.DATASET.HUMANML3D.MAX_TEXT_LEN
-        self.hparams.unit_length = cfg.DATASET.HUMANML3D.UNIT_LEN
+        self.hparams.max_motion_length = 196
+        self.hparams.min_motion_length = 40
+        self.hparams.max_text_len = 20
+        self.hparams.unit_length = 4
 
         # Additional parameters
-        self.hparams.debug = cfg.DEBUG
-        self.hparams.stage = cfg.TRAIN.STAGE
+        # self.hparams.debug = cfg.DEBUG
+        self.hparams.stage = kwargs.get("stage")
+        self.hparams.split = kwargs.get("split")
         # self.hparams.w_vectorizer = WordVectorizer(
         #     cfg.DATASET.WORD_VERTILIZER_PATH, "our_vab")
+        self.hparams.train_batch_size = 256
+        self.hparams.train_workers = 16
 
         # Dataset switch
-        self.DatasetEval = Text2MotionDatasetEval
+        self.DatasetEval = Text2MotionDataset
 
-        if cfg.TRAIN.STAGE == "vae":
-            if cfg.model.params.motion_vae.target.split('.')[-1].lower() == "vqvae":
-                self.hparams.win_size = 64
-                self.Dataset = MotionDatasetVQ
-            else:
-                self.Dataset = MotionDataset
-        elif 'lm' in cfg.TRAIN.STAGE:
-            self.hparams.code_path = cfg.DATASET.CODE_PATH
-            self.hparams.task_path = cfg.DATASET.TASK_PATH
-            self.hparams.std_text = cfg.DATASET.HUMANML3D.STD_TEXT
-            self.Dataset = Text2MotionDatasetCB
-        elif cfg.TRAIN.STAGE == "token":
-            self.Dataset = Text2MotionDatasetToken
-            self.DatasetEval = Text2MotionDatasetToken
-        elif cfg.TRAIN.STAGE == "m2t":
-            self.Dataset = Text2MotionDatasetM2T
-            self.DatasetEval = Text2MotionDatasetM2T
-        else:
+        
+        if self.hparams.stage == "vae":
+            self.hparams.win_size = 64
+            self.Dataset = MotionDatasetVQ
+            
+        # elif 'lm' in cfg.TRAIN.STAGE:
+        #     self.hparams.code_path = cfg.DATASET.CODE_PATH
+        #     self.hparams.task_path = cfg.DATASET.TASK_PATH
+        #     self.hparams.std_text = cfg.DATASET.HUMANML3D.STD_TEXT
+        #     self.Dataset = Text2MotionDatasetCB
+        # elif cfg.TRAIN.STAGE == "token":
+        #     self.Dataset = Text2MotionDatasetToken
+        #     self.DatasetEval = Text2MotionDatasetToken
+        # elif cfg.TRAIN.STAGE == "m2t":
+        #     self.Dataset = Text2MotionDatasetM2T
+        #     self.DatasetEval = Text2MotionDatasetM2T
+        elif self.hparams.stage == "t2m":
             self.Dataset = Text2MotionDataset
-
+        else:
+            raise ValueError(f"Unknown stage: {self.hparams.stage}")
         # Get additional info of the dataset
         self._sample_set = self.get_sample_set(overrides={"split": "test", "tiny": True})
         self.nfeats = self._sample_set.nfeats
-        cfg.DATASET.NFEATS = self.nfeats
+
         
         
 
