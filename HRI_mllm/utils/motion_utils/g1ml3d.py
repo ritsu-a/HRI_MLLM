@@ -50,37 +50,32 @@ def qinv(q):
 
 
 def recover_root_rot_pos(data):
-    rot_vel = data[..., 0]
-    r_rot_ang = torch.zeros_like(rot_vel).to(data.device)
-    '''Get Y-axis rotation from rotation velocity'''
-    r_rot_ang[..., 1:] = rot_vel[..., :-1]
-    r_rot_ang = torch.cumsum(r_rot_ang, dim=-1)
-
-    r_rot_quat = torch.zeros(data.shape[:-1] + (4,)).to(data.device)
-    r_rot_quat[..., 0] = torch.cos(r_rot_ang)
-    r_rot_quat[..., 2] = torch.sin(r_rot_ang)
-
-    r_pos = torch.zeros(data.shape[:-1] + (3,)).to(data.device)
-    r_pos[..., 1:, [0, 2]] = data[..., :-1, 1:3]
-    '''Add Y-axis rotation to root position'''
-    r_pos = qrot(qinv(r_rot_quat), r_pos)
-
-    r_pos = torch.cumsum(r_pos, dim=-2)
-
-    r_pos[..., 1] = data[..., 3]
-    return r_rot_quat, r_pos
+    r_velocity = data[:, 0:4]  # 旋转速度 (sin(θ/2))
+    l_velocity = data[:, 4:6]  # XY速度
+    root_z = data[:, 6:7]       # 高度
+    
+    # 还原translation
+    restored_translation = np.zeros((len(data)+1, 3))
+    restored_translation[0, :] = [0, 0, root_z[0,0]]
+    restored_translation[1:, 0:2] = np.cumsum(l_velocity, axis=0) + restored_translation[0, 0:2]
+    restored_translation[1:, 2] = root_z[:, 0]
+    
+    # 还原rotation
+    restored_rotation = np.zeros((len(data)+1, 4))
+    restored_rotation[0] = np.array([0, 0, 0, 1])  # 初始四元数 (w, x, y, z)
+    
+    for i in range(1, len(restored_rotation)):
+        delta_q = r_velocity[i-1]
+        restored_rotation[i] = qmul_np(delta_q, restored_rotation[i-1])
+    
+    return restored_rotation[1:], restored_translation[1:]
 
 def recover_from_ric(data):
 
-    r_rot_quat, r_pos = recover_root_rot_pos(data)
+
+    global_rotations_quat, global_positions = recover_root_rot_pos(data)
 
     device = data.device
-
-    rot = torch.tensor([
-        [0, 0, 1],
-        [1, 0, 0],
-        [0, 1, 0],
-    ], dtype=torch.float).to(device)
 
 
     joints_num = 29 
@@ -88,23 +83,29 @@ def recover_from_ric(data):
     batch_size = data.shape[0]
     num_frames = data.shape[1]
 
-    global_positions = r_pos.reshape(-1, 3, 1)
-    global_rotations = quat_to_matrix(r_rot_quat)[..., :3, :2].reshape(-1, 3, 2)
+     
+
+    global_positions = global_positions.reshape(-1, 3, 1)
+    global_rotations = quat_to_matrix(torch.from_numpy(global_rotations_quat))[..., :3, :2].reshape(-1, 3, 2).numpy()
+
+
+    dof_angles = data[..., 7 + (links_num - 1) * 3: 7 + (links_num - 1) * 3 + joints_num].reshape(-1, joints_num)
+
+    
+
     data_dict = {
+        "angles": dof_angles,
         "global_rotation": global_rotations,
         "global_translation": global_positions,
-        "scale": torch.ones(3).to(device),
+        "scale": np.ones(3),
     }
 
-
-    dof_angles = data[..., 4 + (links_num - 1) * 3: 4 + (links_num - 1) * 3 + joints_num].reshape(-1, joints_num)
     model = G1_29_Motion_Model(batch_size * num_frames, device=device)
     model.set_angles(dof_angles)
     model.set_global_matrix(data_dict)
     link_to_root_dict = model.forward_kinematics()
-    link_to_root_pos = link_to_root_dict[:, :, :3, 3] @ rot
+    link_to_root_pos = link_to_root_dict[:, :, :3, 3] 
     positions = link_to_root_pos.view(batch_size, num_frames, -1, 3)
-
 
     return positions
 
