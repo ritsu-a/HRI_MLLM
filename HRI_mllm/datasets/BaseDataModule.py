@@ -30,7 +30,7 @@ class BASEDataModule(pl.LightningDataModule):
         if self._val_dataset is None:
             params = self.hparams.copy()
             params['code_path'] = None
-            params['split'] = self.cfg.EVAL.SPLIT
+            params['split'] = 'val'
             self._val_dataset = self.DatasetEval(**params)
         return self._val_dataset
 
@@ -41,7 +41,7 @@ class BASEDataModule(pl.LightningDataModule):
             #                                       **self.hparams)
             params = self.hparams.copy()
             params['code_path'] = None
-            params['split'] = self.cfg.TEST.SPLIT
+            params['split'] = "test"
             self._test_dataset = self.DatasetEval( **params)
         return self._test_dataset
 

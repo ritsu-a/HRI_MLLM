@@ -12,8 +12,8 @@ import os
 from .quaternion import *
 from .paramUtil import *
 
-hparams_mean = np.load(os.path.join("/data0/data/G1ML3D", "Mean.npy"))
-hparams_std = np.load(os.path.join("/data0/data/G1ML3D", "Std.npy"))
+hparams_mean = np.load(os.path.join("/root/pengyang/codebase/HRI_MLLM/data/G1ML3D_v1", "Mean.npy"))
+hparams_std = np.load(os.path.join("/root/pengyang/codebase/HRI_MLLM/data/G1ML3D_v1", "Std.npy"))
 
 def feats2joints(features):
     mean = torch.tensor(hparams_mean).to(features)
@@ -50,27 +50,75 @@ def qinv(q):
 
 
 def recover_root_rot_pos(data):
-    r_velocity = data[:, 0:4]  # 旋转速度 (sin(θ/2))
-    l_velocity = data[:, 4:6]  # XY速度
-    root_z = data[:, 6:7]       # 高度
+    assert data.dim() == 3, "Input data must be a 3D tensor (batch_size, frame, num_features)"
+    batch_size = data.shape[0]
+    r_velocity = data[:, :, 0:4]  
+    l_velocity = data[:, :, 4:6]  # XY速度
+    root_z = data[:, :, 6:7]       # 高度
+
     
     # 还原translation
-    restored_translation = np.zeros((len(data)+1, 3))
-    restored_translation[0, :] = [0, 0, root_z[0,0]]
-    restored_translation[1:, 0:2] = np.cumsum(l_velocity, axis=0) + restored_translation[0, 0:2]
-    restored_translation[1:, 2] = root_z[:, 0]
+    restored_translation = torch.zeros((batch_size, data.shape[1]+1, 3)).to(data.device)
+    restored_translation[:, 0, :] = torch.tensor([0, 0, root_z[:, 0 ,0]])
+    restored_translation[:, 1:, 0:2] = torch.cumsum(l_velocity, axis=1) + restored_translation[:, 0, 0:2]
+    restored_translation[:, 1:, 2] = root_z[:, :, 0]
     
     # 还原rotation
-    restored_rotation = np.zeros((len(data)+1, 4))
-    restored_rotation[0] = np.array([0, 0, 0, 1])  # 初始四元数 (w, x, y, z)
+    restored_rotation = torch.zeros((batch_size, data.shape[1]+1, 4)).to(data.device)
+    restored_rotation[:, 0, :] = torch.from_numpy(np.array([0, 0, 0, 1])).expand(batch_size, 1, 4)  # 初始四元数 (w, x, y, z)
     
-    for i in range(1, len(restored_rotation)):
-        delta_q = r_velocity[i-1]
-        restored_rotation[i] = qmul_np(delta_q, restored_rotation[i-1])
+
+    for i in range(1, restored_rotation.shape[1]):
+        delta_q = r_velocity[:, i-1]
+        restored_rotation[:, i] = qmul(delta_q, restored_rotation[:, i-1])
     
-    return restored_rotation[1:], restored_translation[1:]
+    return restored_rotation[:, 1:], restored_translation[:, 1:]
 
 def recover_from_ric(data):
+    assert data.dim() == 3, "Input data must be a 3D tensor (batch_size, frame, num_features)"
+
+
+    global_rotations_quat, global_positions = recover_root_rot_pos(data)
+
+    device = data.device
+
+    joints_num = 29 
+    links_num = 41
+    batch_size = data.shape[0]
+    num_frames = data.shape[1]
+
+     
+    global_positions = global_positions.reshape(-1, 3, 1)
+    global_rotations = quat_to_matrix(global_rotations_quat)[..., :3, :2].reshape(-1, 3, 2)
+
+
+    dof_angles = data[..., 7 + (links_num - 1) * 3: 7 + (links_num - 1) * 3 + joints_num].reshape(-1, joints_num)
+
+    
+
+    data_dict = {
+        "angles": dof_angles,
+        "global_rotation": global_rotations,
+        "global_translation": global_positions,
+        "scale":torch.ones(3).to(device),
+    }
+
+    model = G1_29_Motion_Model(batch_size * num_frames, device=device)
+    model.set_angles(dof_angles)
+    model.set_global_matrix(data_dict)
+    link_to_root_dict = model.forward_kinematics()
+    link_to_root_pos = link_to_root_dict[:, :, :3, 3] 
+    positions = link_to_root_pos.view(batch_size, num_frames, -1, 3)
+
+    return positions
+
+def vec_to_data_pkl(data, fps=20, reference_motion_pth=None, robot_name="g1_29", scale=np.ones(3)):
+    """
+    Convert the vec representation to data_dict
+    :param vec: vec, the vec representation
+    :return: data_dict, the data_dict
+    """
+    assert data.dim() == 3, "Input data must be a 3D tensor (batch_size, frame, num_features)"
 
 
     global_rotations_quat, global_positions = recover_root_rot_pos(data)
@@ -84,32 +132,29 @@ def recover_from_ric(data):
     num_frames = data.shape[1]
 
      
-
     global_positions = global_positions.reshape(-1, 3, 1)
-    global_rotations = quat_to_matrix(torch.from_numpy(global_rotations_quat))[..., :3, :2].reshape(-1, 3, 2).numpy()
+    global_rotations = quat_to_matrix(global_rotations_quat)[..., :3, :2].reshape(-1, 3, 2)
 
 
     dof_angles = data[..., 7 + (links_num - 1) * 3: 7 + (links_num - 1) * 3 + joints_num].reshape(-1, joints_num)
 
-    
 
     data_dict = {
+        "fps": fps,
+        "reference_motion_pth": reference_motion_pth,
+        "robot_name": robot_name,
         "angles": dof_angles,
         "global_rotation": global_rotations,
         "global_translation": global_positions,
-        "scale": np.ones(3),
+        "scale": scale,
     }
 
-    model = G1_29_Motion_Model(batch_size * num_frames, device=device)
-    model.set_angles(dof_angles)
-    model.set_global_matrix(data_dict)
-    link_to_root_dict = model.forward_kinematics()
-    link_to_root_pos = link_to_root_dict[:, :, :3, 3] 
-    positions = link_to_root_pos.view(batch_size, num_frames, -1, 3)
 
-    return positions
 
-import torch
+    ### rot_data = data_dict["angles"]
+    return data_dict
+
+
 from tqdm import tqdm
 
 # positions (batch, joint_num, 3)

@@ -82,7 +82,8 @@ class G1ML3DDataModule(BASEDataModule):
         self.njoints = 41
         
         # Path to the dataset
-        data_root = pjoin(DATA_ROOT, "G1ML3D")
+        #todo
+        data_root = pjoin(DATA_ROOT, "G1ML3D_v1")
         self.hparams.data_root = data_root
         self.hparams.text_dir = pjoin(data_root, "texts")
         self.hparams.motion_dir = pjoin(data_root, 'new_joint_vecs')
@@ -109,7 +110,7 @@ class G1ML3DDataModule(BASEDataModule):
         self.hparams.train_workers = 16
 
         # Dataset switch
-        self.DatasetEval = Text2MotionDataset
+        self.DatasetEval = MotionDatasetVQ
 
         
         if self.hparams.stage == "vae":
@@ -132,8 +133,9 @@ class G1ML3DDataModule(BASEDataModule):
         else:
             raise ValueError(f"Unknown stage: {self.hparams.stage}")
         # Get additional info of the dataset
-        self._sample_set = self.get_sample_set(overrides={"split": "test", "tiny": True})
-        self.nfeats = self._sample_set.nfeats
+        # self._sample_set = self.get_sample_set(overrides={"split": "test", "tiny": True})
+        self.nfeats = 280
+        #TODO
 
         
         

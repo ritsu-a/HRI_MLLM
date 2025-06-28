@@ -11,7 +11,7 @@ import pickle
 from HRI_mllm.datasets.G1ML3D import G1ML3DDataModule
 from HRI_mllm.utils.motion_utils.metrics import calc_mpjpe, calc_pampjpe
 
-from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.io.g1_29_humanml3d_representation import vec_to_data_pkl
+from HRI_mllm.utils.motion_utils.g1ml3d import vec_to_data_pkl
 
 
 def open_yaml(path):
@@ -30,7 +30,7 @@ motion_vae.to(device="cuda")
 
 
 ### loading G1ML3D dataset
-dataset = G1ML3DDataModule(stage="t2m", split="train")
+dataset = G1ML3DDataModule(stage="vae", split="train")
 train_dataset = dataset.train_dataset
 
 
@@ -46,25 +46,29 @@ OUTPUT_DIR = os.path.join(Path(ROOT).parent,"output", "g1_motion")
 
 ### testing the motion VQVAE
 from HRI_mllm.utils.motion_utils.g1ml3d import feats2joints
-for idx in range(10):
-    test_sample = torch.from_numpy(train_dataset[idx][1]).unsqueeze(0).cuda()
-    text = train_dataset[idx][0]
-    code = motion_vae.encode(test_sample)
-    decoded = motion_vae.decode(code[0])
-    print(decoded.shape, text, "mpjpe:", calc_mpjpe(feats2joints(test_sample)[0], feats2joints(decoded)[0]).mean(),
-          "pampjpe:", calc_pampjpe(feats2joints(test_sample)[0], feats2joints(decoded)[0]).mean())
-    
+with torch.no_grad():
+        
+    for idx in range(10):
+        test_sample = torch.from_numpy(train_dataset[idx][1]).unsqueeze(0).cuda()
+        text = train_dataset[idx][0]
+        code = motion_vae.encode(test_sample)
+        decoded = motion_vae.decode(code[0])
 
-    data_dict_gt = vec_to_data_pkl(test_sample[0].detach().cpu().numpy())
-    data_dict_decoded = vec_to_data_pkl(decoded[0].detach().cpu().numpy())
 
-    data_dict_gt['text'] = text
-    data_dict_decoded['text'] = text
+        print(decoded.shape, text, "mpjpe:", calc_mpjpe(feats2joints(test_sample)[0], feats2joints(decoded)[0]).mean(),
+            "pampjpe:", calc_pampjpe(feats2joints(test_sample)[0], feats2joints(decoded)[0]).mean())
+        
 
-    with open(os.path.join(OUTPUT_DIR, f"g1ml3d_{idx}_gt.pkl"), 'wb') as f:
-        pickle.dump(data_dict_gt, f)
-    with open(os.path.join(OUTPUT_DIR, f"g1ml3d_{idx}_decoded.pkl"), 'wb') as f:
-        pickle.dump(data_dict_decoded, f)
+        data_dict_gt = vec_to_data_pkl(test_sample)
+        data_dict_decoded = vec_to_data_pkl(decoded)
+
+        data_dict_gt['text'] = text
+        data_dict_decoded['text'] = text
+
+        with open(os.path.join(OUTPUT_DIR, f"g1ml3d_{idx}_gt.pkl"), 'wb') as f:
+            pickle.dump(data_dict_gt, f)
+        with open(os.path.join(OUTPUT_DIR, f"g1ml3d_{idx}_decoded.pkl"), 'wb') as f:
+            pickle.dump(data_dict_decoded, f)
 
 
 

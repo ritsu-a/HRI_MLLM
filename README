@@ -9,6 +9,10 @@ Install:
     git checkout g1_hri_mllm(maybe not need this line?)
     pip install -e .
 
+Compute joint_vec for g1ml3d:
+    python HRI_mllm/external/HRI_retarget/HRI_retarget/scripts/g1ml3d_motion_representation.py 
+    python HRI_mllm/external/HRI_retarget/HRI_retarget/utils/io/humanml3d_mean_variance.py
+    copy texts folder
 
 Inference:
     python HRI_mllm/scripts/test.py
@@ -28,3 +32,5 @@ TODO:
     update and test motion encoder(mostly vae)
 
     in /root/pengyang/codebase/HRI_MLLM/HRI_mllm/datasets/BaseDataModule.py remove all cfg dependency
+
+    dependency IN /root/pengyang/codebase/HRI_MLLM/HRI_mllm/datasets/G1ML3D.py /root/pengyang/codebase/HRI_MLLM/HRI_mllm/utils/motion_utils/g1ml3d.py
