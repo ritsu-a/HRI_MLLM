@@ -11,7 +11,7 @@ import pickle
 from HRI_mllm.datasets.G1ML3D import G1ML3DDataModule
 from HRI_mllm.utils.motion_utils.metrics import calc_mpjpe, calc_pampjpe
 
-from HRI_mllm.utils.motion_utils.g1ml3d import vec_to_data_pkl
+from HRI_mllm.utils.motion_utils.g1ml3d import vec_to_data_pkl, feats2joints
 
 
 def open_yaml(path):
@@ -45,7 +45,7 @@ OUTPUT_DIR = os.path.join(Path(ROOT).parent,"output", "g1_motion")
 
 
 ### testing the motion VQVAE
-from HRI_mllm.utils.motion_utils.g1ml3d import feats2joints
+from HRI_mllm.utils.motion_utils.g1ml3d import feats2datapkl
 with torch.no_grad():
         
     for idx in range(10):
@@ -59,8 +59,8 @@ with torch.no_grad():
             "pampjpe:", calc_pampjpe(feats2joints(test_sample)[0], feats2joints(decoded)[0]).mean())
         
 
-        data_dict_gt = vec_to_data_pkl(test_sample)
-        data_dict_decoded = vec_to_data_pkl(decoded)
+        data_dict_gt = feats2datapkl(test_sample)
+        data_dict_decoded = feats2datapkl(decoded)
 
         data_dict_gt['text'] = text
         data_dict_decoded['text'] = text

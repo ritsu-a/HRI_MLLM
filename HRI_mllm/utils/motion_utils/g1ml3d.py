@@ -21,6 +21,12 @@ def feats2joints(features):
     features = features * std + mean
     return recover_from_ric(features)
 
+def feats2datapkl(features):
+    mean = torch.tensor(hparams_mean).to(features)
+    std = torch.tensor(hparams_std).to(features)
+    features = features * std + mean
+    return vec_to_data_pkl(features)
+
 def qrot(q, v):
     """
     Rotate vector(s) v about the rotation described by quaternion(s) q.
@@ -119,6 +125,7 @@ def vec_to_data_pkl(data, fps=20, reference_motion_pth=None, robot_name="g1_29",
     :return: data_dict, the data_dict
     """
     assert data.dim() == 3, "Input data must be a 3D tensor (batch_size, frame, num_features)"
+    assert data.shape[0] == 1, "Input data must have batch size of 1"
 
 
     global_rotations_quat, global_positions = recover_root_rot_pos(data)
