@@ -65,13 +65,13 @@ def recover_root_rot_pos(data):
     
     # 还原translation
     restored_translation = torch.zeros((batch_size, data.shape[1]+1, 3)).to(data.device)
-    restored_translation[:, 0, :] = torch.tensor([0, 0, root_z[:, 0 ,0]])
-    restored_translation[:, 1:, 0:2] = torch.cumsum(l_velocity, axis=1) + restored_translation[:, 0, 0:2]
+    restored_translation[:, 0, 2] = root_z[:, 0 ,0]
+    restored_translation[:, 1:, 0:2] = torch.cumsum(l_velocity, axis=1) + restored_translation[:, :1, 0:2]
     restored_translation[:, 1:, 2] = root_z[:, :, 0]
     
     # 还原rotation
     restored_rotation = torch.zeros((batch_size, data.shape[1]+1, 4)).to(data.device)
-    restored_rotation[:, 0, :] = torch.from_numpy(np.array([0, 0, 0, 1])).expand(batch_size, 1, 4)  # 初始四元数 (w, x, y, z)
+    restored_rotation[:, 0, :] = torch.from_numpy(np.array([0, 0, 0, 1])).expand(batch_size, 4)  # 初始四元数 (w, x, y, z)
     
 
     for i in range(1, restored_rotation.shape[1]):

@@ -11,8 +11,9 @@ from HRI_mllm.datasets.G1ML3D import G1ML3DDataModule
 from HRI_mllm.utils.motion_utils.g1ml3d import feats2joints
 from HRI_mllm.utils.motion_utils.metrics import calc_mpjpe, calc_pampjpe
 from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.io.g1_29_humanml3d_representation import vec_to_data_pkl
-
+import torch.nn.functional as F
 import numpy as np
+from tqdm import tqdm
 
 # 加载配置文件
 def open_yaml(path):
@@ -20,16 +21,38 @@ def open_yaml(path):
         return yaml.safe_load(file)
 
 # 初始化 wandb
-wandb.init(project="motion-vqvae", entity="ritsu")  # 替换为你的 wandb 用户名
+wandb.init(mode='offline', project="motion-vqvae", entity="ritsu")  # 替换为你的 wandb 用户名
 
 # 加载数据集
+
+def collate_fn(batch):
+    motions = torch.stack([torch.from_numpy(item[1]) for item in batch])
+    if motions.isnan().any():
+        print("Found NaN in motion data")
+        import ipdb;ipdb.set_trace()
+    return motions
+    
 def load_dataset():
     dataset = G1ML3DDataModule(stage="vae", split="train")
     train_dataset = dataset.train_dataset
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4)
     val_dataset = dataset.val_dataset
-    val_dataloader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4)
-    return train_loader, val_dataloader
+    # for _, motions, length, _, _, _, _, name, idx in train_dataset:
+    #     motions = torch.from_numpy(motions)
+    #     if motions.isnan().any():
+    #         print("Found NaN in motion data")
+    #         import ipdb;ipdb.set_trace()
+    #     if motions.shape[0] < 64:
+    #         print(f"Skipping motion with length {motions.shape[0]}")
+    #         continue
+    #     if motions.shape[1] != 280:  # 确保关节数量正确
+    #         print(f"Skipping motion with incorrect joint count: {motions.shape[1]}")
+    #         continue
+    
+
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4, collate_fn=collate_fn)
+    val_dataset = dataset.val_dataset
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4, collate_fn=collate_fn)
+    return train_loader, val_loader
 
 # 在验证集上测试 MPJPE 和 PA-MPJPE
 def validate(model, val_loader, device):
@@ -37,15 +60,16 @@ def validate(model, val_loader, device):
     mpjpe_list, pa_mpjpe_list = [], []
     
     with torch.no_grad():
-        for texts, motions in val_loader:
+        for motions in val_loader:
             motions = motions.to(device)
             code = model.encode(motions)
-            decoded = model.decode(code[0])  # 解码生成运动
+
+            decoded = model.decode(code[0]).reshape(motions.shape)  # 解码生成运动
             
             # 计算关节位置
+            
             joints_gt = feats2joints(motions)
             joints_pred = feats2joints(decoded)
-            
             # 计算 MPJPE 和 PA-MPJPE
             for i in range(motions.shape[0]):
                 mpjpe = calc_mpjpe(joints_gt[i], joints_pred[i]).mean()
@@ -57,8 +81,32 @@ def validate(model, val_loader, device):
     return np.mean(mpjpe_list), np.mean(pa_mpjpe_list)
 
 
+def compute_loss(features, x_out, quant_loss, beta: float = 0.25):
+    """
+    Args:
+        features: 输入数据 [B, ...]
+        x_out: 重建输出 [B, ...]
+        quant_loss: 量化器返回的loss（如 commitment loss）
+        beta: commitment loss 的权重系数（默认参考 VQ-VAE 论文）
+    Returns:
+        total_loss: 总损失
+        recon_loss: 重建损失
+        quant_loss: 量化损失
+    """
+    # 1. 重建损失（假设输入是图像像素值，范围 [0,1]）
+    recon_loss = F.mse_loss(x_out, features, reduction='mean')  # 或用 F.binary_cross_entropy
+    
+    # 2. 量化损失（直接使用 quantizer 返回的 loss）
+    #    通常包含 codebook 的 L2 损失和 commitment loss
+    
+    # 3. 总损失（加权求和）
+    total_loss = recon_loss + quant_loss  # 如果 quant_loss 已包含 beta 权重
+    
+    return total_loss, recon_loss, quant_loss
+
+
 # 训练函数
-def train_vqvae(config, train_loader):
+def train_vqvae(config, train_loader, val_loader):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # 初始化模型
@@ -66,14 +114,19 @@ def train_vqvae(config, train_loader):
     optimizer = torch.optim.Adam(motion_vae.parameters(), lr=config.get("lr", 1e-4))
     
     # 训练循环
-    for epoch in range(config["epochs"]):
+    for epoch in tqdm(range(config["epochs"])):
         total_loss = 0.0
-        for batch_idx, (texts, motions) in enumerate(train_loader):
+        for batch_idx, motions in enumerate(train_loader):
             motions = motions.to(device)
             
             # 前向传播
-            code, vq_loss, recon_loss = motion_vae(motions)
-            loss = recon_loss + vq_loss  # 总损失 = 重构损失 + VQ 损失
+            # Forward pass
+            x_out, quant_loss, perplexity = motion_vae(motions)
+    
+            # 计算损失
+            loss, recon_loss, quant_loss = compute_loss(motions, x_out, quant_loss, beta=0.25)
+            if loss.isnan().any():
+                import ipdb;ipdb.set_trace()
             
             # 反向传播
             optimizer.zero_grad()
@@ -87,11 +140,18 @@ def train_vqvae(config, train_loader):
                 "epoch": epoch,
                 "batch_loss": loss.item(),
                 "recon_loss": recon_loss.item(),
-                "vq_loss": vq_loss.item(),
+                "quant_loss": quant_loss.item(),
+                "perplexity": perplexity.item(),
             })
             
-            if batch_idx % 10 == 0:
+            if batch_idx == 0 and epoch % 10 == 0:  # 每10个epoch打印一次
                 print(f"Epoch {epoch}, Batch {batch_idx}, Loss: {loss.item():.4f}")
+                mpjpe, pampjpe = validate(motion_vae, val_loader, device)
+                print(f"Validation MPJPE: {mpjpe:.4f}, PA-MPJPE: {pampjpe:.4f}")
+                wandb.log({
+                    "validation_mpjpe": mpjpe,
+                    "validation_pampjpe": pampjpe,
+                })
         
         # 计算并记录 epoch 数据
         avg_loss = total_loss / len(train_loader)
@@ -109,17 +169,17 @@ def train_vqvae(config, train_loader):
 if __name__ == "__main__":
     # 加载配置
     motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "g1_vqvae.yaml"))
-    motion_config["epochs"] = 50  # 训练 epoch 数
+    motion_config["epochs"] = 500  # 训练 epoch 数
     motion_config["lr"] = 1e-4   # 学习率
     
     # 记录超参数到 wandb
     wandb.config.update(motion_config)
     
     # 加载数据
-    train_loader = load_dataset()
+    train_loader, val_loader = load_dataset()
     
     # 训练模型
-    trained_vae = train_vqvae(motion_config, train_loader)
+    trained_vae = train_vqvae(motion_config, train_loader, val_loader)
     
     # 保存最终模型
     torch.save(trained_vae.state_dict(), "vqvae_final.pt")

@@ -96,7 +96,7 @@ class G1ML3DDataModule(BASEDataModule):
         
         # Length of the dataset
         self.hparams.max_motion_length = 196
-        self.hparams.min_motion_length = 40
+        self.hparams.min_motion_length = 64
         self.hparams.max_text_len = 20
         self.hparams.unit_length = 4
 

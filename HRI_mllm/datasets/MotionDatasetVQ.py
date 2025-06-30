@@ -50,4 +50,4 @@ class MotionDatasetVQ(Text2MotionDataset):
         motion = motion[idx:idx + self.window_size]
         motion = (motion - self.mean) / self.std
 
-        return None, motion, length, None, None, None, None,
+        return None, motion, length, None, None, None, None
