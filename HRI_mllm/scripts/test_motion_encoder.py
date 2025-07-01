@@ -46,6 +46,25 @@ OUTPUT_DIR = os.path.join(Path(ROOT).parent,"output", "g1_motion")
 
 ### testing the motion VQVAE
 from HRI_mllm.utils.motion_utils.g1ml3d import feats2datapkl
+
+
+def merge_data_list(data_dict_list):
+    merged_data = {
+        'fps': data_dict_list[0]['fps'],
+        'robot_name': data_dict_list[0]['robot_name'],
+        'angles': torch.cat([data_dict['angles'] for data_dict in data_dict_list]),
+        'global_rotation': torch.cat([data_dict['global_rotation'] for data_dict in data_dict_list]),
+        'global_translation': torch.cat([data_dict['global_translation'] for data_dict in data_dict_list]),
+        'scale': data_dict_list[0]['scale'],
+        'text': [data_dict['text'] for data_dict in data_dict_list],
+    }
+
+   
+    return merged_data
+
+
+gt_data_dict_list = []
+decoded_data_dict_list = []
 with torch.no_grad():
         
     for idx in range(10):
@@ -65,10 +84,22 @@ with torch.no_grad():
         data_dict_gt['text'] = text
         data_dict_decoded['text'] = text
 
+        gt_data_dict_list.append(data_dict_gt)
+        decoded_data_dict_list.append(data_dict_decoded)
+
         with open(os.path.join(OUTPUT_DIR, f"g1ml3d_{idx}_gt.pkl"), 'wb') as f:
             pickle.dump(data_dict_gt, f)
         with open(os.path.join(OUTPUT_DIR, f"g1ml3d_{idx}_decoded.pkl"), 'wb') as f:
             pickle.dump(data_dict_decoded, f)
+
+
+gt_data_dict = merge_data_list(gt_data_dict_list)
+decoded_data_dict = merge_data_list(decoded_data_dict_list)
+
+with open(os.path.join(OUTPUT_DIR, "g1ml3d_gt.pkl"), 'wb') as f:
+    pickle.dump(gt_data_dict, f)
+with open(os.path.join(OUTPUT_DIR, "g1ml3d_decoded.pkl"), 'wb') as f:
+    pickle.dump(decoded_data_dict, f)
 
 
 
