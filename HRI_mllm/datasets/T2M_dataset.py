@@ -7,6 +7,7 @@ import numpy as np
 from torch.utils import data
 from rich.progress import track
 from os.path import join as pjoin
+from copy import deepcopy
 
 
 class Text2MotionDataset(data.Dataset):
@@ -85,7 +86,9 @@ class Text2MotionDataset(data.Dataset):
                 length_list.append(data_dict[name]['length'])
 
         else:
+            enumerator_list = list(enumerate(self.id_list))
             for idx, name in enumerator:
+                print("name: ",name)
                 if len(new_name_list) > maxdata:
                     break
                 try:
@@ -148,6 +151,62 @@ class Text2MotionDataset(data.Dataset):
                         length_list.append(len(motion))
                 except:
                     pass
+
+            # 针对beat数据集的一个补丁。因为beat数据集跑这段文本处理会报错
+            if len(new_name_list) == 0 or len(length_list) == 0:
+                print(" Enter PostProcessing Step! ")
+                for idx, name in enumerator_list:
+                    print("maxdata: ",maxdata)
+                    if len(new_name_list) > maxdata:
+                        break
+                    try:
+                        text_dict = {}
+                        # print("motion_dir: ",motion_dir)
+                        motion = np.load(pjoin(motion_dir, name + ".npy"))
+                        # print("len(motion): ", len(motion))
+                        # if (len(motion)) < self.min_motion_length or (len(motion)
+                        #                                             >= 200):
+                        #     continue
+
+                        # Read text
+                        text_data = []
+                        flag = False
+                        with cs.open(pjoin(text_dir, name + '.txt')) as f:
+                            text_dict['caption'] = "dummy_caption"
+                            text_dict['tokens'] = ['dummy','token']
+        
+                            new_name = random.choice(
+                                'ABCDEFGHIJKLMNOPQRSTUVW') + '_' + name
+                            print("new_name: ", new_name)
+                            while new_name in new_name_list:
+                                new_name = random.choice(
+                                    'ABCDEFGHIJKLMNOPQRSTUVW') + '_' + name
+                            name_count = 1
+                            while new_name in data_dict:
+                                new_name += '_' + name_count
+                                name_count += 1
+                            data_dict[new_name] = {
+                                'motion': motion,
+                                "length": len(motion),
+                                'text': [text_dict]
+                            }
+                            new_name_list.append(new_name)
+                            length_list.append(len(motion))
+
+                        if flag:
+                            data_dict[name] = {
+                                'motion': motion,
+                                "length": len(motion),
+                                'text': text_data
+                            }
+                            new_name_list.append(name)
+                            length_list.append(len(motion))
+                    except:
+                        pass
+
+            # print("new_name_list:", new_name_list)
+            # print("length_list:", length_list)
+
             name_list, length_list = zip(
                 *sorted(zip(new_name_list, length_list), key=lambda x: x[1]))
 

@@ -1,5 +1,7 @@
 # Partially from https://github.com/Mael-zys/T2M-GPT
 
+# 2025.07.02 HIT-xiaowangzi
+# 学习VQ-VAE的代码 搞清楚每一个细节
 from typing import List, Optional, Union
 import torch
 import torch.nn as nn
@@ -31,6 +33,7 @@ class VQVae(nn.Module):
 
         self.code_dim = code_dim
         self.nfeats = nfeats
+        # 初始化Encoder和Decoder
         self.encoder = Encoder(nfeats,
                                output_emb_width,
                                down_t,
@@ -51,6 +54,7 @@ class VQVae(nn.Module):
                                activation=activation,
                                norm=norm)
 
+        # 初始化Quantizer
         if quantizer == "ema_reset":
             self.quantizer = QuantizeEMAReset(code_num, code_dim, mu=0.99)
         elif quantizer == "orig":
@@ -86,6 +90,7 @@ class VQVae(nn.Module):
 
         return x_out, loss, perplexity
 
+    # 直接拦腰折断 提取出tokenizer直接跑路
     def encode(
         self,
         features: Tensor,
@@ -130,6 +135,7 @@ class Encoder(nn.Module):
 
         blocks = []
         filter_t, pad_t = stride_t * 2, stride_t // 2
+        # 简单理解Conv1d:一个小块的卷积核 在一个长条上进行滑动
         blocks.append(nn.Conv1d(input_emb_width, width, 3, 1, 1))
         blocks.append(nn.ReLU())
 

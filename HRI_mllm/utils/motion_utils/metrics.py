@@ -1,6 +1,7 @@
 import torch
 
 # motion reconstructions metrics
+# 看一看都有什么评价指标?哈哈哈
 
 def batch_compute_similarity_transform_torch(S1, S2):
     """
@@ -8,6 +9,10 @@ def batch_compute_similarity_transform_torch(S1, S2):
     a set of 3D points S1 (3 x N) closest to a set of 3D points S2,
     where R is an 3x3 rotation matrix, t 3x1 translation, s scale.
     i.e. solves the orthogonal Procrutes problem.
+
+    翻译一下:给定两组点云S1,S2,求解最优的s,R,t,使得:
+     S1_aligned = s * R @ S1 + t 最接近S2
+    即:最小化两组点之间的均方误差
     """
     transposed = False
     if S1.shape[0] != 3 and S1.shape[0] != 2:
@@ -55,6 +60,8 @@ def batch_compute_similarity_transform_torch(S1, S2):
 
     return S1_hat, (scale, R, t)
 
+# 每个关节点位置的平均误差
+# 这里pred和target都是position
 def compute_mpjpe(preds,
                   target,
                   valid_mask=None,
@@ -79,7 +86,8 @@ def compute_mpjpe(preds,
     else:
         mpjpe_pck_seq = mpjpe[:, pck_joints]
         return mpjpe_pck_seq
-
+    
+# 其实就是减掉一个基准 从global_pos变成local_pos
 def align_by_parts(joints, align_inds=None):
     if align_inds is None:
         return joints
@@ -105,6 +113,10 @@ def calc_mpjpe(preds, target, align_inds=[0], sample_wise=True, trans=None):
 
 
 def calc_pampjpe(preds, target, sample_wise=True, return_transform_mat=False):
+    """
+    MPJPE没有做点云的配准,这个PAMPJPE有了一步配准,可以补偿掉一些缩放,平移,旋转的误差
+    所以理论上PAMPJPE会比MPJPE小一些
+    """
     # Expects BxJx3
     target, preds = target.float(), preds.float()
     # extracting the keypoints that all samples have valid annotations

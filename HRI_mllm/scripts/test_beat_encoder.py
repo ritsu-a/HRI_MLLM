@@ -1,0 +1,116 @@
+# 2025.07.05 HIT-xiaowangzi
+# 看一看是怎样做的Motion Encoder
+from HRI_mllm.model.motion_encoder.vqvae import VQVae, VQVAE_Trans
+from HRI_mllm import ROOT
+
+from collections import OrderedDict
+from HRI_mllm.utils.motion_utils.beatml3d import feats2joints, vec_to_data_pkl
+import yaml
+import os
+import torch
+import sys
+import pickle
+from HRI_mllm.datasets.BeatML3D import BeatML3DDataModule
+from HRI_mllm.utils.motion_utils.metrics import calc_mpjpe, calc_pampjpe
+
+
+
+def open_yaml(path):
+    with open(path, 'r', encoding="utf-8") as file:
+        data = yaml.safe_load(file)
+    return data        
+
+### loading motion VQVAE
+# 啊，这里面把权重已经加载进来了，这个程序是用来inference,不是用来train
+motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "beat_vqvae.yaml"))
+motion_vae = VQVae(**motion_config)
+state_dict = torch.load(motion_config["ckpt"], map_location="cpu", weights_only=False)
+motion_vae.load_state_dict(state_dict, strict=True)
+motion_vae.eval()
+motion_vae.to(device="cuda")
+
+
+
+### loading G1ML3D dataset
+# 嗯，测试不是应该用测试集吗，为什么还用训练集？
+dataset = BeatML3DDataModule(stage="vae", split="train")
+train_dataset = dataset.train_dataset
+
+
+
+
+### decode 502 dim feature into g1_inspirehands motion pickle
+import os
+from pathlib import Path 
+from HRI_mllm import ROOT
+
+OUTPUT_DIR = os.path.join(Path(ROOT).parent,"output", "beat_motion")
+
+
+### testing the motion VQVAE
+from HRI_mllm.utils.motion_utils.beatml3d import feats2datapkl
+
+# 把所有的pickle数据合并成一个字典
+def merge_data_list(data_dict_list):
+    merged_data = {
+        'fps': data_dict_list[0]['fps'],
+        'robot_name': data_dict_list[0]['robot_name'],
+        'angles': torch.cat([data_dict['angles'] for data_dict in data_dict_list]),
+        'global_rotation': torch.cat([data_dict['global_rotation'] for data_dict in data_dict_list]),
+        'global_translation': torch.cat([data_dict['global_translation'] for data_dict in data_dict_list]),
+        'scale': data_dict_list[0]['scale'],
+        'text': [data_dict['text'] for data_dict in data_dict_list],
+    }
+
+   
+    return merged_data
+
+
+gt_data_dict_list = []
+decoded_data_dict_list = []
+
+# 随机抽出10个样本 
+# (1) 测试指标
+# (2) 可视化 encode, decode的结果
+with torch.no_grad():
+        
+    for idx in range(10):
+        # motion
+        test_sample = torch.from_numpy(train_dataset[idx][1]).unsqueeze(0).cuda()
+        # text
+        text = train_dataset[idx][0]
+        # encode, decode,看看reconstruction loss
+        code = motion_vae.encode(test_sample)
+        decoded = motion_vae.decode(code[0])
+
+
+        print(decoded.shape, text, "mpjpe:", calc_mpjpe(feats2joints(test_sample)[0], feats2joints(decoded)[0]).mean(),
+            "pampjpe:", calc_pampjpe(feats2joints(test_sample)[0], feats2joints(decoded)[0]).mean())
+        
+
+        data_dict_gt = feats2datapkl(test_sample)
+        data_dict_decoded = feats2datapkl(decoded)
+
+        data_dict_gt['text'] = text
+        data_dict_decoded['text'] = text
+
+        gt_data_dict_list.append(data_dict_gt)
+        decoded_data_dict_list.append(data_dict_decoded)
+
+        with open(os.path.join(OUTPUT_DIR, f"beatml3d_{idx}_gt.pkl"), 'wb') as f:
+            pickle.dump(data_dict_gt, f)
+        with open(os.path.join(OUTPUT_DIR, f"beatml3d_{idx}_decoded.pkl"), 'wb') as f:
+            pickle.dump(data_dict_decoded, f)
+
+
+gt_data_dict = merge_data_list(gt_data_dict_list)
+decoded_data_dict = merge_data_list(decoded_data_dict_list)
+
+with open(os.path.join(OUTPUT_DIR, "beatml3d_gt.pkl"), 'wb') as f:
+    pickle.dump(gt_data_dict, f)
+with open(os.path.join(OUTPUT_DIR, "beatml3d_decoded.pkl"), 'wb') as f:
+    pickle.dump(decoded_data_dict, f)
+
+
+
+

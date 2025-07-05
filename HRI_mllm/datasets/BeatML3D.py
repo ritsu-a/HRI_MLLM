@@ -1,0 +1,204 @@
+# 2025.07.05 HIT-xiaowangzi
+# 看一看数据集是怎么处理的呢？看明白这一套代码对我是非常有帮助的
+import numpy as np
+import torch
+import os 
+from os.path import join as pjoin
+# from .humanml.utils.word_vectorizer import WordVectorizer
+from HRI_mllm.utils.motion_utils.beatml3d import recover_from_ric
+from .BaseDataModule import BASEDataModule
+# from .T2M_dataset import Text2MotionDataset
+# from .humanml import Text2MotionDatasetEval, Text2MotionDataset, Text2MotionDatasetCB, MotionDataset, MotionDatasetVQ, Text2MotionDatasetToken, Text2MotionDatasetM2T
+from HRI_mllm import DATA_ROOT
+from .MotionDatasetVQ import MotionDatasetVQ
+
+
+def collate_tensors(batch):
+    """
+  `collate_tensors` is a utility function for batching variable-length 
+  tensors (or numpy arrays) into a single tensor, padding as needed. 
+  This is useful for preparing batches of data for deep learning models, 
+  especially when samples have different shapes (e.g., sequences of different lengths).
+
+  Indeed, different motions have different lengths, so we need to pad them to the same length.
+  dimension of canvas: (batch_size, max_dim_1, max_dim_2, ..., max_dim_n)
+    """
+    if isinstance(batch[0], np.ndarray):
+        batch = [torch.tensor(b).float() for b in batch]
+
+    dims = batch[0].dim()
+    max_size = [max([b.size(i) for b in batch]) for i in range(dims)]
+    size = (len(batch), ) + tuple(max_size)
+    canvas = batch[0].new_zeros(size=size)
+    for i, b in enumerate(batch):
+        sub_tensor = canvas[i]
+        for d in range(dims):
+            sub_tensor = sub_tensor.narrow(d, 0, b.size(d))
+        sub_tensor.add_(b)
+    return canvas
+
+# ???这个batch里面到底有什么啊？
+def humanml3d_collate(batch):
+    # filter out None entries
+    notnone_batches = [b for b in batch if b is not None]
+    EvalFlag = False if notnone_batches[0][5] is None else True
+
+    # Sort by text length
+    if EvalFlag:
+        notnone_batches.sort(key=lambda x: x[5], reverse=True)
+
+    # Motion only
+    adapted_batch = {
+        "motion":
+        collate_tensors([torch.tensor(b[1]).float() for b in notnone_batches]),
+        "length": [b[2] for b in notnone_batches],
+    }
+
+    # Text and motion
+    if notnone_batches[0][0] is not None:
+        adapted_batch.update({
+            "text": [b[0] for b in notnone_batches],
+            "all_captions": [b[7] for b in notnone_batches],
+        })
+
+    # Evaluation related
+    if EvalFlag:
+        adapted_batch.update({
+            "text": [b[0] for b in notnone_batches],
+            "word_embs":
+            collate_tensors(
+                [torch.tensor(b[3]).float() for b in notnone_batches]),
+            "pos_ohot":
+            collate_tensors(
+                [torch.tensor(b[4]).float() for b in notnone_batches]),
+            "text_len":
+            collate_tensors([torch.tensor(b[5]) for b in notnone_batches]),
+            "tokens": [b[6] for b in notnone_batches],
+        })
+
+    # Tasks
+    if len(notnone_batches[0]) == 9:
+        adapted_batch.update({"tasks": [b[8] for b in notnone_batches]})
+
+    return adapted_batch
+
+
+
+class BeatML3DDataModule(BASEDataModule):
+    def __init__(self, **kwargs):
+
+        super().__init__(collate_fn=humanml3d_collate)
+        self.save_hyperparameters(logger=False)
+        
+        # Basic info of the dataset
+        self.name = "beatml3d"
+        self.njoints = 74
+        
+        # Path to the dataset
+        #todo
+        data_root = pjoin(DATA_ROOT, "G1_beat")
+        self.hparams.data_root = data_root
+        self.hparams.text_dir = pjoin(data_root, "texts")
+        self.hparams.motion_dir = pjoin(data_root, 'new_joint_vecs')
+        
+        # Mean and std of the dataset
+        dis_data_root = data_root
+        self.hparams.mean = np.load(pjoin(dis_data_root, "Mean.npy"))
+        self.hparams.std = np.load(pjoin(dis_data_root, "Std.npy"))
+        
+        
+        # Length of the dataset
+        # 这什么意思？限制motion的长度?
+        self.hparams.max_motion_length = 196
+        self.hparams.min_motion_length = 64
+        self.hparams.max_text_len = 20
+        self.hparams.unit_length = 4
+
+        # Additional parameters
+        # self.hparams.debug = cfg.DEBUG
+        self.hparams.stage = kwargs.get("stage")
+        self.hparams.split = kwargs.get("split")
+        # self.hparams.w_vectorizer = WordVectorizer(
+        #     cfg.DATASET.WORD_VERTILIZER_PATH, "our_vab")
+        self.hparams.train_batch_size = 256
+        self.hparams.train_workers = 16
+
+        # Dataset switch
+        self.DatasetEval = MotionDatasetVQ
+
+        
+        if self.hparams.stage == "vae":
+            self.hparams.win_size = 64
+            self.Dataset = MotionDatasetVQ
+            
+        # elif 'lm' in cfg.TRAIN.STAGE:
+        #     self.hparams.code_path = cfg.DATASET.CODE_PATH
+        #     self.hparams.task_path = cfg.DATASET.TASK_PATH
+        #     self.hparams.std_text = cfg.DATASET.HUMANML3D.STD_TEXT
+        #     self.Dataset = Text2MotionDatasetCB
+        # elif cfg.TRAIN.STAGE == "token":
+        #     self.Dataset = Text2MotionDatasetToken
+        #     self.DatasetEval = Text2MotionDatasetToken
+        # elif cfg.TRAIN.STAGE == "m2t":
+        #     self.Dataset = Text2MotionDatasetM2T
+        #     self.DatasetEval = Text2MotionDatasetM2T
+        elif self.hparams.stage == "t2m":
+            self.Dataset = Text2MotionDataset
+        else:
+            raise ValueError(f"Unknown stage: {self.hparams.stage}")
+        # Get additional info of the dataset
+        # self._sample_set = self.get_sample_set(overrides={"split": "test", "tiny": True})
+        self.nfeats = 502
+        #TODO
+
+        
+        
+
+    def feats2joints(self, features):
+        mean = torch.tensor(self.hparams.mean).to(features)
+        std = torch.tensor(self.hparams.std).to(features)
+        features = features * std + mean
+        return recover_from_ric(features)
+
+    # 这个函数应该没有用。
+    # 师兄还有很多地方没有改完。先放在这里。
+    def joints2feats(self, features):
+        example_data = np.load(os.path.join(self.hparams.data_root, 'joints', '000021.npy'))
+        example_data = example_data.reshape(len(example_data), -1, 3)
+        example_data = torch.from_numpy(example_data)
+        features = process_file(features, self.njoints, example_data, 't2m')[0]
+        return features
+
+    def normalize(self, features):
+        mean = torch.tensor(self.hparams.mean).to(features)
+        std = torch.tensor(self.hparams.std).to(features)
+        features = (features - mean) / std
+        return features
+
+    def denormalize(self, features):
+        mean = torch.tensor(self.hparams.mean).to(features)
+        std = torch.tensor(self.hparams.std).to(features)
+        features = features * std + mean
+        return features
+
+    def renorm4t2m(self, features):
+        # renorm to t2m norms for using t2m evaluators
+        ori_mean = torch.tensor(self.hparams.mean).to(features)
+        ori_std = torch.tensor(self.hparams.std).to(features)
+        eval_mean = torch.tensor(self.hparams.mean_eval).to(features)
+        eval_std = torch.tensor(self.hparams.std_eval).to(features)
+        features = features * ori_std + ori_mean
+        features = (features - eval_mean) / eval_std
+        return features
+
+    def mm_mode(self, mm_on=True):
+        if mm_on:
+            self.is_mm = True
+            self.name_list = self.test_dataset.name_list
+            self.mm_list = np.random.choice(self.name_list,
+                                            self.cfg.METRIC.MM_NUM_SAMPLES,
+                                            replace=False)
+            self.test_dataset.name_list = self.mm_list
+        else:
+            self.is_mm = False
+            self.test_dataset.name_list = self.name_list
