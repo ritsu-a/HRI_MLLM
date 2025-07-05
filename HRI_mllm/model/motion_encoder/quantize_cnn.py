@@ -3,7 +3,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# 离散化是VQ-VAE的灵魂。小王子要仔细看哦
 class QuantizeEMAReset(nn.Module):
+    # nb_code: 码本中的code数量
+    # code_dim: 每个code的维度
     def __init__(self, nb_code, code_dim, mu):
         super().__init__()
         self.nb_code = nb_code
@@ -19,6 +22,7 @@ class QuantizeEMAReset(nn.Module):
         self.register_buffer('codebook', torch.zeros(self.nb_code, self.code_dim).to(device))
 
     def _tile(self, x):
+        # nb_code_x: N*T code_dim: C
         nb_code_x, code_dim = x.shape
         if nb_code_x < self.nb_code:
             n_repeats = (self.nb_code + nb_code_x - 1) // nb_code_x
@@ -30,7 +34,9 @@ class QuantizeEMAReset(nn.Module):
         return out
 
     def init_codebook(self, x):
+        # 初始的时候，把x补成超过码本的长度
         out = self._tile(x)
+        # 从初始represenation中取前self.nb_code个作为码本
         self.codebook = out[:self.nb_code]
         self.code_sum = self.codebook.clone()
         self.code_count = torch.ones(self.nb_code, device=self.codebook.device)
@@ -75,6 +81,7 @@ class QuantizeEMAReset(nn.Module):
 
     def preprocess(self, x):
         # NCT -> NTC -> [NT, C]
+        # 因为discretize codebooks都是Channel维的
         x = x.permute(0, 2, 1).contiguous()
         x = x.view(-1, x.shape[-1])  
         return x
@@ -103,6 +110,7 @@ class QuantizeEMAReset(nn.Module):
             self.init_codebook(x)
 
         # quantize and dequantize through bottleneck
+        # 第一步得到的是最近的codebook的index，第二步得到的是对应的codebook向量
         code_idx = self.quantize(x)
         x_d = self.dequantize(code_idx)
 
@@ -113,12 +121,16 @@ class QuantizeEMAReset(nn.Module):
             perplexity = self.compute_perplexity(code_idx)
         
         # Loss
+        # 这一步是为了让x接近x_d(学生的答案接近老师的答案)
         commit_loss = F.mse_loss(x, x_d.detach())
 
         # Passthrough
+        # 这一步是为了让x_d的梯度可以回传到x
+        # 这里很深刻，因为如果直接用x_d,那么argmin不可导，梯度就断了。用这样一个trick,梯度从x_d直接传到x
         x_d = x + (x_d - x).detach()
 
         # Postprocess
+        # 还原回x本来的维度
         x_d = x_d.view(N, T, -1).permute(0, 2, 1).contiguous()   #(N, DIM, T)
         
         return x_d, commit_loss, perplexity

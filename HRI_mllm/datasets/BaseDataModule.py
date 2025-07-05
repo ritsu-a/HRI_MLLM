@@ -1,7 +1,7 @@
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 
-
+# Pytorch-Lighting加载数据集的基类
 class BASEDataModule(pl.LightningDataModule):
     def __init__(self, collate_fn):
         super().__init__()

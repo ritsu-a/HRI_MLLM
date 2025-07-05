@@ -44,7 +44,8 @@ h11==0.16.0
 hf-xet==1.1.4
 hjson==3.1.0
 -e git+ssh://git@github.com/ritsu-a/HRI_MLLM.git@6f52840aeb8c5d49ef769d1936f4f7449cec1601#egg=HRI_mllm
--e git+ssh://git@github.com/ritsu-a/HRI_retarget.git@3cb7146f38226067ff61e853c83882f0b7ffffdf#egg=HRI_retarget&subdirectory=../../../../HRI_mllm/external/HRI_retarget
+# -e git+ssh://git@github.com/ritsu-a/HRI_retarget.git@3cb7146f38226067ff61e853c83882f0b7ffffdf#egg=HRI_retarget&subdirectory=../../../../HRI_mllm/external/HRI_retarget
+-e git+ssh://git@github.com/ritsu-a/HRI_retarget.git@3cb7146f38226067ff61e853c83882f0b7ffffdf#egg=HRI_retarget
 httpcore==1.0.9
 httpx==0.28.1
 huggingface-hub==0.33.0

@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torch
 
+# 读一下resnet块的实现
 class nonlinearity(nn.Module):
     def __init__(self):
         super().__init__()
@@ -14,6 +15,14 @@ class ResConv1DBlock(nn.Module):
         super().__init__()
         padding = dilation
         self.norm = norm
+
+
+        """
+        Batch Norm, Layer Norm, Group Norm的讲解:
+        batch-norm 在不同batch之间算norm
+        Layer norm 在同一个batch里面算norm
+        https://cloud.tencent.com/developer/article/2409007
+        """
         if norm == "LN":
             self.norm1 = nn.LayerNorm(n_in)
             self.norm2 = nn.LayerNorm(n_in)
@@ -69,6 +78,7 @@ class ResConv1DBlock(nn.Module):
         return x
 
 class Resnet1D(nn.Module):
+    # 无数个resnet block的concatenation
     def __init__(self, n_in, n_depth, dilation_growth_rate=1, reverse_dilation=True, activation='relu', norm=None):
         super().__init__()
         
