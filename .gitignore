@@ -133,7 +133,7 @@ venv.bak/
 .pyre/
 checkpoints/
 data/*
-output/
+output/*
 log/
 *logs/
 *logs
