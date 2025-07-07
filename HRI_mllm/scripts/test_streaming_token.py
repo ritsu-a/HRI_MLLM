@@ -1,6 +1,12 @@
 from HRI_mllm.model.qwen2_5omni import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
 from HRI_mllm.utils.qwen_omni_utils import process_mm_info, process_audio_info
+from HRI_mllm.model.qwen2_5omni_motion.monkey_patch_generate import monkey_patch_qwen2_5omni_for_motion
+from transformers import TextStreamer
+
 import torch
+
+
+
 
 # @title inference function
 def inference(video_path):
@@ -23,15 +29,19 @@ def inference(video_path):
     audio = output[1]
     return text, audio
 
-
 model_path = "Qwen/Qwen2.5-Omni-3B"
+processor = Qwen2_5OmniProcessor.from_pretrained(model_path)
+tokenizer = processor.tokenizer
+streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+
+monkey_patch_qwen2_5omni_for_motion(Qwen2_5OmniForConditionalGeneration, streamer=streamer)
+
 model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
     model_path,
     torch_dtype=torch.bfloat16,
     device_map="auto",
     attn_implementation="flash_attention_2",
 )
-processor = Qwen2_5OmniProcessor.from_pretrained(model_path)
 
 
 import librosa
