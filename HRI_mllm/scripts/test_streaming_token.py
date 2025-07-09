@@ -1,3 +1,6 @@
+### streaming demo for qwen2_5omni_motion
+### HRI_mllm/model/qwen2_5omni_motion/monkey_patch_generate.py for monkey patching the generate function to support token-level streaming
+
 from HRI_mllm.model.qwen2_5omni import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
 from HRI_mllm.utils.qwen_omni_utils import process_mm_info, process_audio_info
 from HRI_mllm.model.qwen2_5omni_motion.monkey_patch_generate import monkey_patch_qwen2_5omni_for_motion
