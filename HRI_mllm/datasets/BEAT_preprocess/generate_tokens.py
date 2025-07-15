@@ -89,9 +89,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--audio_path", type=str, default="/root/pengyang/codebase/HRI_MLLM/data/BEAT_TTS/tts_qwen1_result.txt")
     parser.add_argument("--motion_root", type=str, default="/root/pengyang/codebase/HRI_MLLM/data/motion/g1/BEAT")
-    parser.add_argument("--save_path", type=str, default="/root/pengyang/codebase/HRI_MLLM/data/BEAT_TTS/data")
+    parser.add_argument("--save_path", type=str, default="/root/pengyang/codebase/HRI_MLLM/data/BEAT_TTS")
+
 
     args = parser.parse_args()
+    save_split_path = os.path.join(args.save_path, "all.txt")
+    args.save_path = os.path.join(args.save_path, "data")
+
+    with open(save_split_path, "w", encoding="utf-8") as f:
+        f.write('')  
+
 
 
 
@@ -160,6 +167,10 @@ if __name__ == "__main__":
 
         torch.save(audio_tokens, audio_token_save_path)
         torch.save(motion_tokens, motion_token_save_path)
+
+
+        with open(save_split_path, "a", encoding="utf-8") as f:
+            f.write(audio_token_save_path + "\n")  
 
 
         # decoded_features = motion_vae.decode(motion_tokens.to("cuda:0")).detach().cpu()
