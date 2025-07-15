@@ -78,18 +78,19 @@ class G1ML3DDataModule(BASEDataModule):
         self.save_hyperparameters(logger=False)
         
         # Basic info of the dataset
+        self.hparams.dataset_name = kwargs.get("dataset_name", "G1ML3D")
         self.name = "g1ml3d"
         self.njoints = 41
         
         # Path to the dataset
-        #todo
-        data_root = pjoin(DATA_ROOT, "G1ML3D_v1")
+        data_root = kwargs.get("data_root", pjoin(DATA_ROOT, "G1ML3D_v1"))
+
         self.hparams.data_root = data_root
         self.hparams.text_dir = pjoin(data_root, "texts")
         self.hparams.motion_dir = pjoin(data_root, 'new_joint_vecs')
         
         # Mean and std of the dataset
-        dis_data_root = data_root
+        dis_data_root = kwargs.get("dis_data_root", data_root)
         self.hparams.mean = np.load(pjoin(dis_data_root, "Mean.npy"))
         self.hparams.std = np.load(pjoin(dis_data_root, "Std.npy"))
         
@@ -134,8 +135,7 @@ class G1ML3DDataModule(BASEDataModule):
             raise ValueError(f"Unknown stage: {self.hparams.stage}")
         # Get additional info of the dataset
         # self._sample_set = self.get_sample_set(overrides={"split": "test", "tiny": True})
-        self.nfeats = 280
-        #TODO
+        self.nfeats = kwargs.get("nfeats", 280)
 
         
         

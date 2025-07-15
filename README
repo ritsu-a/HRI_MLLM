@@ -27,9 +27,6 @@ Finetune Qwen2.5 Omni:
 TODO:
     inference is too slow 
 
-    monkey-patch qwen2.5omni (or even change the raw class?)
-
-    update and test motion encoder(mostly vae)
 
     in /root/pengyang/codebase/HRI_MLLM/HRI_mllm/datasets/BaseDataModule.py remove all cfg dependency
 

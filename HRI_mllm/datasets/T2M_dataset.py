@@ -26,6 +26,7 @@ class Text2MotionDataset(data.Dataset):
         debug=False,
         **kwargs,
     ):
+        dataset_name = kwargs.get("dataset_name", "G1ML3D")
 
         # restrian the length of motion and text
         self.max_length = 20
@@ -86,57 +87,60 @@ class Text2MotionDataset(data.Dataset):
 
         else:
             for idx, name in enumerator:
-                if len(new_name_list) > maxdata:
+                if len(new_name_list) > maxdata and dataset_name in ['G1ML3D',]:
                     break
                 try:
+
                     motion = np.load(pjoin(motion_dir, name + ".npy"))
-                    if (len(motion)) < self.min_motion_length or (len(motion)
-                                                                  >= 200):
-                        continue
-
-                    # Read text
-                    text_data = []
                     flag = False
-                    with cs.open(pjoin(text_dir, name + '.txt')) as f:
-                        lines = f.readlines()
-                        for line in lines:
-                            text_dict = {}
-                            line_split = line.strip().split('#')
-                            caption = line_split[0]
-                            t_tokens = line_split[1].split(' ')
-                            f_tag = float(line_split[2])
-                            to_tag = float(line_split[3])
-                            f_tag = 0.0 if np.isnan(f_tag) else f_tag
-                            to_tag = 0.0 if np.isnan(to_tag) else to_tag
+                    
+                    if dataset_name in ['G1ML3D']:
 
-                            text_dict['caption'] = caption
-                            text_dict['tokens'] = t_tokens
-                            if f_tag == 0.0 and to_tag == 0.0:
-                                flag = True
-                                text_data.append(text_dict)
-                            else:
-                                motion_new = motion[int(f_tag *
-                                                        fps):int(to_tag * fps)]
-                                if (len(motion_new)
-                                    ) < self.min_motion_length or (
-                                        len(motion_new) >= 200):
-                                    continue
-                                new_name = random.choice(
-                                    'ABCDEFGHIJKLMNOPQRSTUVW') + '_' + name
-                                while new_name in new_name_list:
+                        if (len(motion)) < self.min_motion_length or (len(motion)
+                                                                    >= 200):
+                            continue
+                        # Read text
+                        text_data = []
+                        with cs.open(pjoin(text_dir, name + '.txt')) as f:
+                            lines = f.readlines()
+                            for line in lines:
+                                text_dict = {}
+                                line_split = line.strip().split('#')
+                                caption = line_split[0]
+                                t_tokens = line_split[1].split(' ')
+                                f_tag = float(line_split[2])
+                                to_tag = float(line_split[3])
+                                f_tag = 0.0 if np.isnan(f_tag) else f_tag
+                                to_tag = 0.0 if np.isnan(to_tag) else to_tag
+
+                                text_dict['caption'] = caption
+                                text_dict['tokens'] = t_tokens
+                                if f_tag == 0.0 and to_tag == 0.0:
+                                    flag = True
+                                    text_data.append(text_dict)
+                                else:
+                                    motion_new = motion[int(f_tag *
+                                                            fps):int(to_tag * fps)]
+                                    if (len(motion_new)
+                                        ) < self.min_motion_length or (
+                                            len(motion_new) >= 200):
+                                        continue
                                     new_name = random.choice(
                                         'ABCDEFGHIJKLMNOPQRSTUVW') + '_' + name
-                                name_count = 1
-                                while new_name in data_dict:
-                                    new_name += '_' + name_count
-                                    name_count += 1
-                                data_dict[new_name] = {
-                                    'motion': motion_new,
-                                    "length": len(motion_new),
-                                    'text': [text_dict]
-                                }
-                                new_name_list.append(new_name)
-                                length_list.append(len(motion_new))
+                                    while new_name in new_name_list:
+                                        new_name = random.choice(
+                                            'ABCDEFGHIJKLMNOPQRSTUVW') + '_' + name
+                                    name_count = 1
+                                    while new_name in data_dict:
+                                        new_name += '_' + name_count
+                                        name_count += 1
+                                    data_dict[new_name] = {
+                                        'motion': motion_new,
+                                        "length": len(motion_new),
+                                        'text': [text_dict]
+                                    }
+                                    new_name_list.append(new_name)
+                                    length_list.append(len(motion_new))
 
                     if flag:
                         data_dict[name] = {
@@ -146,7 +150,18 @@ class Text2MotionDataset(data.Dataset):
                         }
                         new_name_list.append(name)
                         length_list.append(len(motion))
-                except:
+                    
+                    if dataset_name in ['BEAT_TTS']:
+                        data_dict[name] = {
+                            'motion': motion,
+                            "length": len(motion),
+                        }
+                        new_name_list.append(name)
+                        length_list.append(len(motion))
+
+                    
+                except Exception as e:
+                    print(f"Error processing {name}: {e}")
                     pass
             name_list, length_list = zip(
                 *sorted(zip(new_name_list, length_list), key=lambda x: x[1]))

@@ -20,7 +20,7 @@ wandb.init(
         "min_seq_length": 128,     # 最小序列长度
         "batch_size": 8,
         "learning_rate": 5e-5,
-        "epochs": 10,
+        "epochs": 100,
         "sliding_window_step": 32,  # 滑动窗口步长（单元数）
         "pad_token_id": 8194 + 512, # 新增的填充token
     }
@@ -237,7 +237,7 @@ for epoch in range(config.epochs):
     
     # 保存检查点
     if (epoch + 1) % 2 == 0:
-        ckpt_path = f"checkpoints/epoch_{epoch+1}.pt"
+        ckpt_path = f"output/motion_adaptor/checkpoints/epoch_{epoch+1}.pt"
         torch.save({
             'epoch': epoch,
             'model_state': model.state_dict(),
@@ -246,8 +246,8 @@ for epoch in range(config.epochs):
         wandb.save(ckpt_path)
 
 # 保存最终模型
-model.save_pretrained("audio_motion_gpt2_long")
-wandb.save("audio_motion_gpt2_long/*")
+model.save_pretrained("output/motion_adaptor/audio_motion_gpt2")
+wandb.save("output/motion_adaptor/audio_motion_gpt2/*")
 
 # # 长序列推理函数
 # def generate_for_long_audio(audio_tokens, model, device, max_length=3000):

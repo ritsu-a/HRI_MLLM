@@ -94,7 +94,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     save_split_path = os.path.join(args.save_path, "all.txt")
-    args.save_path = os.path.join(args.save_path, "data")
+    joint_vecs_save_path = os.path.join(args.save_path, "new_joint_vecs")
+    save_path = os.path.join(args.save_path, "data")
 
     with open(save_split_path, "w", encoding="utf-8") as f:
         f.write('')  
@@ -157,13 +158,16 @@ if __name__ == "__main__":
 
         g1ml3d_features = data_pkl_to_vec(motion_pkl_resampled)
 
+        # np.save(os.path.join(joint_vecs_save_path, filename.replace(".wav", "_joint_vecs.npy")), g1ml3d_features)
+
+
         from HRI_mllm.utils.motion_utils.g1ml3d import normalize_features, feats2datapkl
         
         motion_tokens = motion_vae.encode(normalize_features(torch.from_numpy(g1ml3d_features).unsqueeze(0).to("cuda:0")))[0].detach().cpu()
 
 
-        audio_token_save_path = os.path.join(args.save_path, filename.replace(".wav", "_audio_tokens.pt"))
-        motion_token_save_path = os.path.join(args.save_path, filename.replace(".wav", "_motion_tokens.pt"))
+        audio_token_save_path = os.path.join(save_path, filename.replace(".wav", "_audio_tokens.pt"))
+        motion_token_save_path = os.path.join(save_path, filename.replace(".wav", "_motion_tokens.pt"))
 
         torch.save(audio_tokens, audio_token_save_path)
         torch.save(motion_tokens, motion_token_save_path)
@@ -177,13 +181,13 @@ if __name__ == "__main__":
         # data_dict_decoded = feats2datapkl(decoded_features)
 
 
-        # with open(os.path.join(args.save_path, filename.replace(".wav", "_decoded.pkl")), 'wb') as f:
+        # with open(os.path.join(save_path, filename.replace(".wav", "_decoded.pkl")), 'wb') as f:
         #     pickle.dump(data_dict_decoded, f)
 
         # with torch.no_grad():
         #     decoded_audio = token2wav(audio_tokens.to("cuda:0"))
 
-        # sf.write(os.path.join(args.save_path, filename.replace(".wav", "_decoded.wav")), decoded_audio.detach().cpu().numpy(), 24000)
+        # sf.write(os.path.join(save_path, filename.replace(".wav", "_decoded.wav")), decoded_audio.detach().cpu().numpy(), 24000)
         # import ipdb;ipdb.set_trace()
 
 

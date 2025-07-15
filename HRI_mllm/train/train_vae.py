@@ -5,7 +5,7 @@ import wandb
 import pickle
 from pathlib import Path
 from torch.utils.data import DataLoader
-from HRI_mllm import ROOT
+from HRI_mllm import ROOT, DATA_ROOT
 from HRI_mllm.model.motion_encoder.vqvae import VQVae
 from HRI_mllm.datasets.G1ML3D import G1ML3DDataModule
 from HRI_mllm.utils.motion_utils.g1ml3d import feats2joints
@@ -33,7 +33,12 @@ def collate_fn(batch):
     return motions
     
 def load_dataset():
-    dataset = G1ML3DDataModule(stage="vae", split="train")
+    dataset = G1ML3DDataModule(stage="vae", split="train", 
+                               nfeats=280,
+                               data_root=os.path.join(DATA_ROOT, "BEAT_TTS"),
+                               dis_data_root=os.path.join(DATA_ROOT, "G1ML3D_v1"), ### mean and std
+                               dataset_name="BEAT_TTS",
+                               )
     train_dataset = dataset.train_dataset
     val_dataset = dataset.val_dataset
     # for _, motions, length, _, _, _, _, name, idx in train_dataset:
@@ -111,6 +116,14 @@ def train_vqvae(config, train_loader, val_loader):
     
     # 初始化模型
     motion_vae = VQVae(**config).to(device)
+    # 加载预训练模型（如果有的话）
+    if "ckpt" in config and config["ckpt"]:
+        state_dict = torch.load(config["ckpt"], map_location=device, weights_only=False)
+        motion_vae.load_state_dict(state_dict, strict=True)
+        print(f"Loaded pre-trained model from {config['ckpt']}")
+
+
+
     optimizer = torch.optim.Adam(motion_vae.parameters(), lr=config.get("lr", 1e-4))
     
     # 训练循环
@@ -160,7 +173,7 @@ def train_vqvae(config, train_loader, val_loader):
         
         # 保存模型 checkpoint
         if epoch % 5 == 0:
-            torch.save(motion_vae.state_dict(), f"vqvae_epoch_{epoch}.pt")
+            torch.save(motion_vae.state_dict(), f"output/VQVAE/checkpoints/vqvae_epoch_{epoch}.pt")
             wandb.save(f"vqvae_epoch_{epoch}.pt")  # 上传到 wandb
     
     return motion_vae
