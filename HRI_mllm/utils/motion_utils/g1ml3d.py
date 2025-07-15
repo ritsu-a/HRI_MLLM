@@ -15,6 +15,17 @@ from .paramUtil import *
 hparams_mean = np.load(os.path.join("/root/pengyang/codebase/HRI_MLLM/data/G1ML3D_v1", "Mean.npy"))
 hparams_std = np.load(os.path.join("/root/pengyang/codebase/HRI_MLLM/data/G1ML3D_v1", "Std.npy"))
 
+def normalize_features(features):
+    """
+    Normalize the features using the mean and standard deviation.
+    :param features: Tensor of shape (batch_size, num_frames, num_features)
+    :return: Normalized features
+    """
+    mean = torch.tensor(hparams_mean).to(features)
+    std = torch.tensor(hparams_std).to(features)
+    normalized_features = (features - mean) / std
+    return normalized_features
+
 def feats2joints(features):
     mean = torch.tensor(hparams_mean).to(features)
     std = torch.tensor(hparams_std).to(features)
