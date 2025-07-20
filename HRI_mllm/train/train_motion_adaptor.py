@@ -5,8 +5,8 @@ import numpy as np
 import os
 import wandb
 import math
-from collections import defaultdict
 from tqdm import tqdm
+from HRI_mllm.datasets.BEATAudioMotionDataset import BEATAudioMotionDataset
 
 # 初始化Weights & Biases
 wandb.init(
@@ -23,110 +23,14 @@ wandb.init(
         "epochs": 100,
         "sliding_window_step": 32,  # 滑动窗口步长（单元数）
         "pad_token_id": 8194 + 512, # 新增的填充token
+        "interleave_ratio": 10,      # 每10个音频token插入1个动作token
     }
 )
+
+
 config = wandb.config
 
 
-
-# 特殊token定义
-SEQ_PAD_TOKEN = config.pad_token_id             # 序列填充token
-
-class BEATAudioMotionDataset(Dataset):
-    def __init__(self, data_root=config.beat_tts_root):
-        self.samples = []
-        self.stats = defaultdict(int)  # 统计信息
-        self.data_root = data_root
-        with open(f"{self.data_root}/all.txt", "r") as f:
-            audio_files = f.readlines()
-        
-        for audio_file in audio_files:
-
-            audio_file = audio_file.strip()
-            if not audio_file:
-                continue
-            
-            audio_token_save_path = audio_file
-            motion_token_save_path = audio_file.replace('audio_tokens.pt', 'motion_tokens.pt')
-            
-            if not (os.path.exists(audio_token_save_path) and os.path.exists(motion_token_save_path)):
-                continue
-            
-            # 读取音频和动作token
-            audio_tokens = torch.load(audio_token_save_path).squeeze(0)
-            motion_tokens = torch.load(motion_token_save_path).squeeze(0)            
-            # 构建完整序列和掩码
-            full_sequence = []
-            token_types = []  # 0=audio, 1=motion
-            for i in range(len(audio_tokens)):
-                full_sequence.append(audio_tokens[i])
-                token_types.append(0)
-                
-                if (i + 1) % 5 == 0 and i // 5 < len(motion_tokens):
-                    full_sequence.append(motion_tokens[i//5] + config.audio_vocab_size)
-                    token_types.append(1)
-            
-            # 存储原始长序列
-            self.stats['total_sequences'] += 1
-            self.stats['max_length'] = max(self.stats['max_length'], len(full_sequence))
-            
-            # 应用滑动窗口裁剪
-            self.apply_sliding_window(full_sequence, token_types)
-    
-    def apply_sliding_window(self, full_seq, token_types):
-        """将长序列分割为多个子序列"""
-        seq_len = len(full_seq)
-        unit_size = 6  # 5 audio + 1 motion
-        
-        # 计算最大单元数（基于模型最大长度）
-        max_units = config.max_seq_length // unit_size
-        step_units = config.sliding_window_step
-        
-        # 随机起始偏移（增加数据多样性）
-        start_offset = np.random.randint(0, step_units) if seq_len > config.max_seq_length else 0
-        
-        # 滑动窗口裁剪
-        for start_idx in range(start_offset, seq_len, step_units * unit_size):
-            end_idx = min(start_idx + max_units * unit_size, seq_len)
-            
-            # 确保窗口以motion token结束（保持完整单元）
-            while end_idx > start_idx and token_types[end_idx-1] != 1:
-                end_idx -= 1
-                
-            if end_idx - start_idx < config.min_seq_length:
-                continue  # 跳过太短的序列
-                
-            # 截取子序列
-            sub_seq = full_seq[start_idx:end_idx]
-            sub_types = token_types[start_idx:end_idx]
-            
-            # 创建掩码（只计算motion位置的损失）
-            mask = [1 if t == 1 else 0 for t in sub_types]
-            
-            # 填充到统一长度
-            padded_seq = sub_seq + [SEQ_PAD_TOKEN] * (config.max_seq_length - len(sub_seq))
-            padded_mask = mask + [0] * (config.max_seq_length - len(mask))
-            
-            self.samples.append({
-                'tokens': torch.tensor(padded_seq),
-                'mask': torch.tensor(padded_mask),
-                'seq_length': len(sub_seq)  # 实际有效长度
-            })
-            
-            self.stats['generated_samples'] += 1
-    
-    def __len__(self):
-        return len(self.samples)
-    
-    def __getitem__(self, idx):
-        return self.samples[idx]
-    
-    def print_stats(self):
-        print(f"数据集统计:")
-        print(f"- 原始长序列数: {self.stats['total_sequences']}")
-        print(f"- 生成样本数: {self.stats['generated_samples']}")
-        print(f"- 最长原始序列: {self.stats['max_length']} tokens")
-        print(f"- 平均样本长度: {sum(s['seq_length'] for s in self.samples)/len(self.samples):.1f} tokens")
 
 # 创建模型（扩展词表）
 model_config = GPT2Config(
@@ -151,7 +55,7 @@ if config.max_seq_length > 1024:
 wandb.watch(model, log="parameters", log_freq=100)
 
 # 创建数据集
-dataset = BEATAudioMotionDataset()
+dataset = BEATAudioMotionDataset(wandb.config)
 dataset.print_stats()
 
 # 数据加载器（带填充处理）
@@ -191,7 +95,7 @@ for epoch in range(config.epochs):
         lengths = batch['lengths']
         
         # 创建注意力掩码（忽略填充位置）
-        attn_mask = (inputs != SEQ_PAD_TOKEN).float().to(device)
+        attn_mask = (inputs != dataset.SEQ_PAD_TOKEN).float().to(device)
         
         # 创建标签
         labels = inputs.clone()
@@ -246,62 +150,5 @@ for epoch in range(config.epochs):
         wandb.save(ckpt_path)
 
 # 保存最终模型
-model.save_pretrained("output/motion_adaptor/audio_motion_gpt2")
-wandb.save("output/motion_adaptor/audio_motion_gpt2/*")
-
-# # 长序列推理函数
-# def generate_for_long_audio(audio_tokens, model, device, max_length=3000):
-#     model.eval()
-#     generated = []
-#     current_seq = []
-#     motion_count = 0
-#     max_context = config.max_seq_length - 50  # 保留空间生成新token
-    
-#     with torch.no_grad():
-#         for i, token in enumerate(audio_tokens):
-#             current_seq.append(token)
-            
-#             # 每5个audio token尝试生成motion
-#             if (i + 1) % 5 == 0:
-#                 # 当序列过长时使用滑动窗口
-#                 if len(current_seq) > max_context:
-#                     # 保留最近的完整上下文
-#                     keep_from = max(0, len(current_seq) - max_context)
-#                     # 确保从完整单元开始
-#                     while keep_from < len(current_seq) and (keep_from % 6 != 0):
-#                         keep_from += 1
-#                     current_seq = current_seq[keep_from:]
-                
-#                 inputs = torch.tensor([current_seq]).to(device)
-#                 attn_mask = torch.ones_like(inputs).float().to(device)
-                
-#                 # 预测下一个motion token
-#                 output = model(inputs, attention_mask=attn_mask)
-#                 next_token_logits = output.logits[0, -1, :]
-                
-#                 # 限制在motion词表范围内
-#                 motion_logits = next_token_logits[config.audio_vocab_size:]
-#                 next_token = torch.argmax(motion_logits).item() + config.audio_vocab_size
-                
-#                 generated.append(next_token)
-#                 current_seq.append(next_token)  # 添加到上下文
-#                 motion_count += 1
-            
-#             if len(current_seq) >= max_length:
-#                 break
-    
-#     # 提取生成的motion tokens
-#     motion_tokens = [t - config.audio_vocab_size for t in generated]
-#     return motion_tokens
-
-# # 示例使用
-# long_audio = np.random.randint(0, config.audio_vocab_size-2, 2500)  # 2500个audio token
-# motion_output = generate_for_long_audio(long_audio, model, device)
-
-# print(f"Generated {len(motion_output)} motion tokens")
-# wandb.log({
-#     "generated_motion": wandb.Histogram(motion_output),
-#     "input_audio": wandb.Histogram(long_audio)
-# })
-
-# wandb.finish()
+model.save_pretrained("output/motion_adaptor/audio_motion_gpt2_v1")
+wandb.save("output/motion_adaptor/audio_motion_gpt2_v1/*")
