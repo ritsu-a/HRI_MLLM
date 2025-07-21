@@ -23,6 +23,19 @@ VQVAE:
 Finetune Qwen2.5 Omni:
     bash HRI_mllm/scripts/finetune.sh (not done yet)
 
+Inference with gpt2 motion adaptor:
+    CUDA_VISIBLE_DEVICES=0,1 python HRI_mllm/scripts/test_qwen2_5omni_motion_full.py 
+
+
+Server:
+    python HRI_mllm/inference/text_response_server.py
+
+    # visit http://localhost:5000/response?text=your_text_here
+
+    # or use curl
+    # curl -X GET "http://localhost:5000/response?text=your_text_here"
+
+
 
 TODO:
     inference is too slow 

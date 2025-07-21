@@ -1,3 +1,5 @@
+# server.py
+from flask import Flask, request, send_file, jsonify
 ### streaming demo for qwen2_5omni_motion
 ### HRI_mllm/model/qwen2_5omni_motion/monkey_patch_generate.py for monkey patching the generate function to support token-level streaming
 
@@ -9,6 +11,9 @@ from HRI_mllm import ROOT
 
 from HRI_mllm.utils.motion_utils.g1ml3d import vec_to_data_pkl, feats2datapkl
 from HRI_mllm.model.motion_encoder.vqvae import VQVae, VQVAE_Trans
+
+from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.io.motion_pkl_to_csv import load_motion_pkl_as_csv_data
+from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.motion_lib.qpose_denoiser import low_pass_filter
 
 
 
@@ -24,8 +29,11 @@ import soundfile as sf
 
 
 import torch
+import zipfile
+from io import BytesIO
+import shutil
 
-
+import numpy as np
 
 
 # @title inference function
@@ -121,7 +129,7 @@ def audioToken2motionPkl(audio_codes):
     
     motion_tokens = generate_for_long_audio(audio_codes.squeeze(0), motion_adaptor, device=motion_adaptor.device)
 
-    decoded = motion_vae.decode(torch.tensor(motion_tokens).unsqueeze(0).to("cuda"))
+    decoded = motion_vae.decode(torch.tensor(motion_tokens).unsqueeze(0).to("cuda")).detach().cpu()
     data_dict_decoded = feats2datapkl(decoded)
 
     return data_dict_decoded
@@ -157,16 +165,68 @@ motion_vae.eval()
 motion_vae.to(device="cuda")
 
 
-## Use a local HuggingFace model to inference.
-with torch.no_grad():
-    response, audio, audio_code  = inference(text="What do you usually do on weekends? Please describe in detail, including your activities, feelings, and any other relevant information. You can also include any specific events or experiences that stand out to you. The more detailed your response, the better I can understand your weekend activities and emotions.")
-    print(response[0])
 
-    motion_pkl = audioToken2motionPkl(audio_code)
+app = Flask(__name__)
+
+@app.route('/generate-files', methods=['POST'])
+def generate_files():
+    try:
+        data = request.get_json()
+        text = data.get('text')
+        
+        if not text:
+            return jsonify({"error": "No text provided"}), 400
+        
+        # 调用推理函数生成WAV和CSV文件
+        # 假设 inference 函数同时生成WAV和CSV
+        with torch.no_grad():
+            response, audio, audio_code  = inference(text=text)
+
+            motion_pkl = audioToken2motionPkl(audio_code)
 
 
 
-    with open("out.pkl", 'wb') as f:
-        pickle.dump(motion_pkl, f)
+            with open("output.pkl", 'wb') as f:
+                pickle.dump(motion_pkl, f)
 
-    sf.write("out.wav", audio.detach().cpu().numpy(), 24000)
+            motion_csv =  load_motion_pkl_as_csv_data("output.pkl")
+            motion_csv = low_pass_filter(motion_csv, cutoff_freq=0.2, order=4)
+            np.savetxt("output.csv", motion_csv, delimiter=',', fmt='%.8f')
+
+
+            sf.write("output.wav", audio.detach().cpu().numpy(), 24000)
+        # response, audio, audio_code = inference(text=text)
+        print(f"Received text: {text}")
+        
+        # 确保文件存在
+        wav_path = "output.wav"
+        csv_path = "output.csv"
+        
+        if not (os.path.exists(wav_path) and os.path.exists(csv_path)):
+            return jsonify({"error": "Files not generated"}), 500
+        
+        # 创建内存中的ZIP文件
+        memory_zip = BytesIO()
+        
+        with zipfile.ZipFile(memory_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            zipf.write(wav_path, os.path.basename(wav_path))
+            zipf.write(csv_path, os.path.basename(csv_path))
+        
+        memory_zip.seek(0)
+        print("Files generated successfully")
+        
+        # 发送ZIP文件
+        return send_file(
+            memory_zip,
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name='generated_files.zip'
+        )
+    
+    except Exception as e:
+        print(e)
+        return jsonify({"error": str(e)}), 500
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)

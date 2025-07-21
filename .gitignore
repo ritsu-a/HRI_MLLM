@@ -2,6 +2,10 @@
 gradio/
 *.json
 data
+out.pkl
+out.wav
+output.csv
+output.wav
 
 # Byte-compiled / optimized / DLL files
 */__pycache__/
