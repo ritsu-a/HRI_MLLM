@@ -279,7 +279,7 @@ class KimiAudio(object):
         else:
             generated_wav = None
 
-        return generated_wav, generated_text
+        return generated_wav, generated_wav_tokens, generated_text
 
     def detokenize_audio(self, audio_tokens):
         if self.detokenizer is None:

@@ -7,6 +7,9 @@ out.wav
 output.csv
 output.wav
 
+*.wav
+*.pcm
+
 # Byte-compiled / optimized / DLL files
 */__pycache__/
 *.py[cod]
