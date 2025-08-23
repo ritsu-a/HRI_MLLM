@@ -24,6 +24,11 @@ from HRI_mllm.model.qwen2_5omni.streamers import QwenTextStreamer
 from HRI_mllm.model.motion_encoder.vqvae import VQVae, VQVAE_Trans
 from HRI_mllm import ROOT
 
+from huggingface_hub import snapshot_download
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+from kimia_infer.api.prompt_manager import KimiAPromptManager
+
+
 def load_token2wav():
     model_path = "Qwen/Qwen2.5-Omni-3B"
     processor = Qwen2_5OmniProcessor.from_pretrained(model_path)
@@ -87,9 +92,10 @@ def interpolate_quat(quat, target_length):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--audio_path", type=str, default="/root/pengyang/codebase/HRI_MLLM/data/BEAT_TTS/tts_qwen1_result.txt")
+    parser.add_argument("--audio_path", type=str, default="/root/pengyang/codebase/HRI_MLLM/data/beat_english_v0.2.1/all.txt")
     parser.add_argument("--motion_root", type=str, default="/root/pengyang/codebase/HRI_MLLM/data/motion/g1/BEAT")
-    parser.add_argument("--save_path", type=str, default="/root/pengyang/codebase/HRI_MLLM/data/BEAT_TTS")
+    parser.add_argument("--save_path", type=str, default="/root/pengyang/codebase/HRI_MLLM/data/BEAT_TTS_kimi")
+    parser.add_argument("--model_name_or_path", type=str, default="moonshotai/Kimi-Audio-7B")
 
 
     args = parser.parse_args()
@@ -125,6 +131,21 @@ if __name__ == "__main__":
     motion_vae.eval()
     motion_vae.to(device="cuda")
 
+    ### loading kimi audio tokenizer
+    if os.path.exists(args.model_name_or_path):
+        # local path
+        cache_path = args.model_name_or_path
+    else:
+        # cache everything if model_path is a model-id
+        cache_path = snapshot_download(args.model_name_or_path)
+
+    # load model config
+    model_config = AutoConfig.from_pretrained(cache_path, trust_remote_code=True)
+
+    prompt_manager = KimiAPromptManager(
+            model_path=cache_path, kimia_token_offset=model_config.kimia_token_offset, kimia_text_audiodelaytokens=model_config.kimia_mimo_audiodelaytokens
+        )
+
 
     for idx in tqdm(range(total_num)):
 
@@ -132,11 +153,14 @@ if __name__ == "__main__":
         motion_path = os.path.join(args.motion_root, source_audio_path.split("/")[-1].replace(".wav", ".pickle"))
         filename = source_audio_path.split("/")[-1]
 
-        audio_path = source_audio_path.replace(".wav", "_qwen1.wav")
-        audio_token_path = audio_path.replace(".wav", "_tokens.pt")
-        audio_tokens = torch.load(audio_token_path)
-        audio, _ = sf.read(audio_path)
-        source_audio, _ = sf.read(source_audio_path)
+        audio_path = source_audio_path
+        # audio_token_path = audio_path.replace(".wav", "_tokens.pt")
+        # audio_tokens = torch.load(audio_token_path)
+        # audio, _ = sf.read(audio_path)
+        # source_audio, _ = sf.read(source_audio_path)
+
+        kimi_tokens = torch.from_numpy(np.array(prompt_manager._tokenize_audio(audio_path))).unsqueeze(0)
+        
 
         
         with open(motion_path, "rb") as file:
@@ -144,7 +168,7 @@ if __name__ == "__main__":
 
 
         ### resample motion pkl to match the tts audio length
-        target_motion_frames = int(audio_tokens.shape[1] / 50 * 20)
+        target_motion_frames = int(kimi_tokens.shape[1] / 50 * 4 * 20)
 
         resampled_angles = interpolate_tensor(torch.from_numpy(motion_pkl["angles"]), target_motion_frames)
         motion_pkl_resampled = {
@@ -169,7 +193,7 @@ if __name__ == "__main__":
         audio_token_save_path = os.path.join(save_path, filename.replace(".wav", "_audio_tokens.pt"))
         motion_token_save_path = os.path.join(save_path, filename.replace(".wav", "_motion_tokens.pt"))
 
-        torch.save(audio_tokens, audio_token_save_path)
+        torch.save(kimi_tokens, audio_token_save_path)
         torch.save(motion_tokens, motion_token_save_path)
 
 

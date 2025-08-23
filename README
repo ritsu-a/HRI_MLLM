@@ -23,6 +23,10 @@ VQVAE:
 Finetune Qwen2.5 Omni:
     bash HRI_mllm/scripts/finetune.sh (not done yet)
 
+
+Train motion adaptor:
+    python -m torch.distributed.launch --nproc_per_node=8 --nnodes=1 --node_rank=0 \
+        HRI_mllm/train/train_motion_adaptor.py \
 Inference with gpt2 motion adaptor:
     CUDA_VISIBLE_DEVICES=0,1 python HRI_mllm/scripts/test_qwen2_5omni_motion_full.py 
 

@@ -11,7 +11,8 @@ class BEATAudioMotionDataset(Dataset):
         self.samples = []
         self.stats = defaultdict(int)  # 统计信息
         self.data_root = config.beat_tts_root
-        self.interleave_ratio = config.interleave_ratio  # 每10个音频token插入1个动作token
+        self.interleave_audios, self.interleave_motions = config.interleave_ratio  # 每5个音频token插入2个动作token
+
 
         self.SEQ_PAD_TOKEN = config.pad_token_id             # 序列填充token
 
@@ -31,8 +32,9 @@ class BEATAudioMotionDataset(Dataset):
                 continue
             
             # 读取音频和动作token
-            audio_tokens = torch.load(audio_token_save_path).squeeze(0)
+            audio_tokens = torch.load(audio_token_save_path).squeeze(0) - 152064  # 152064是kimi音频token的起始ID
             motion_tokens = torch.load(motion_token_save_path).squeeze(0)    
+
 
 
             # 构建完整序列和掩码
@@ -42,13 +44,16 @@ class BEATAudioMotionDataset(Dataset):
                 full_sequence.append(audio_tokens[i])
                 token_types.append(0)
                 
-                if (i + 1) % self.interleave_ratio == 0 and i // self.interleave_ratio < len(motion_tokens):
-                    full_sequence.append(motion_tokens[i//self.interleave_ratio] + config.audio_vocab_size)
-                    token_types.append(1)
+                if (i + 1) % self.interleave_audios == 0 and i // self.interleave_audios * self.interleave_motions + self.interleave_motions - 1  < len(motion_tokens):
+                    for _ in range(self.interleave_motions):
+                        full_sequence.append(motion_tokens[i//self.interleave_audios * self.interleave_motions + _] + config.audio_vocab_size)
+                        token_types.append(1)
             
             # 存储原始长序列
             self.stats['total_sequences'] += 1
             self.stats['max_length'] = max(self.stats['max_length'], len(full_sequence))
+
+
             
             # 应用滑动窗口裁剪
             self.apply_sliding_window(full_sequence, token_types)
@@ -56,7 +61,7 @@ class BEATAudioMotionDataset(Dataset):
     def apply_sliding_window(self, full_seq, token_types):
         """将长序列分割为多个子序列"""
         seq_len = len(full_seq)
-        unit_size = self.interleave_ratio + 1  # 10 audio + 1 motion
+        unit_size = self.interleave_audios + self.interleave_motions  # 5 audio + 2 motion
         
         # 计算最大单元数（基于模型最大长度）
         max_units = self.config.max_seq_length // unit_size
