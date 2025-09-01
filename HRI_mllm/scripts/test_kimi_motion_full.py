@@ -137,7 +137,7 @@ def audioToken2motionPkl(audio_codes):
 
 
 
-### loading qwen
+### loading kimi
 model = KimiAudio(
     model_path="moonshotai/Kimi-Audio-7B-Instruct",
     load_detokenizer=True,
@@ -217,4 +217,6 @@ motion_pkl = audioToken2motionPkl(audio_tokens)
 with open(os.path.join(output_dir, "out.pkl"), 'wb') as f:
     pickle.dump(motion_pkl, f)
 
+
+import ipdb;ipdb.set_trace()
     

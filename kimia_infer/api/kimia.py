@@ -4,12 +4,15 @@ import tqdm
 import torch
 from loguru import logger
 from huggingface_hub import cached_assets_path
-from transformers import AutoModelForCausalLM
+
+from HRI_mllm.model.kimi_motion import MoonshotKimiaForCausalLM
 
 from kimia_infer.models.detokenizer import get_audio_detokenizer
 from .prompt_manager import KimiAPromptManager
 from kimia_infer.utils.sampler import KimiASampler
 from huggingface_hub import snapshot_download
+
+
 
 class KimiAudio(object):
     def __init__(self, model_path: str, load_detokenizer: bool = True):
@@ -24,7 +27,7 @@ class KimiAudio(object):
     
         logger.info(f"Looking for resources in {cache_path}")
         logger.info(f"Loading whisper model")
-        self.alm = AutoModelForCausalLM.from_pretrained(
+        self.alm = MoonshotKimiaForCausalLM.from_pretrained(
             cache_path, torch_dtype=torch.bfloat16, trust_remote_code=True
         )
         self.alm = self.alm.to(torch.cuda.current_device())
