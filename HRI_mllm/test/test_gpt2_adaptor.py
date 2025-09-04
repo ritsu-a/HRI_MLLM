@@ -7,13 +7,14 @@ from HRI_mllm.model.qwen2_5omni_motion.monkey_patch_generate import monkey_patch
 from HRI_mllm.model.qwen2_5omni.streamers import QwenMotionAdaptorStreamer
 from HRI_mllm import ROOT
 
-from HRI_mllm.utils.motion_utils.g1ml3d import vec_to_data_pkl, feats2datapkl
+from HRI_mllm.utils.motion_utils.g1ml3d import vec_to_data_pkl, feats2datapkl, normalize_features
 from HRI_mllm.model.motion_encoder.vqvae import VQVae, VQVAE_Trans
 
 from kimia_infer.api.kimia import KimiAudio
 
 
 from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.io.motion_pkl_to_csv import load_motion_pkl_as_csv_data
+
 import numpy as np
 
 
@@ -139,24 +140,6 @@ def audioToken2motionPkl(audio_codes):
 
 
 
-
-### loading kimi
-model = KimiAudio(
-    model_path="moonshotai/Kimi-Audio-7B-Instruct",
-    load_detokenizer=True,
-)
-
-sampling_params = {
-    "audio_temperature": 0.8,
-    "audio_top_k": 10,
-    "text_temperature": 0.0,
-    "text_top_k": 5,
-    "audio_repetition_penalty": 1.0,
-    "audio_repetition_window_size": 64,
-    "text_repetition_penalty": 1.0,
-    "text_repetition_window_size": 16,
-}
-
 ### loading motion adaptor
 motion_adaptor = GPT2LMHeadModel.from_pretrained("output/motion_adaptor/kimi_audio_motion_gpt2_v1", device_map="auto")
 
@@ -196,25 +179,13 @@ motion_vae.to(device="cuda")
 # os.makedirs(output_dir, exist_ok=True)
 
 
-audio_path =  "/root/pengyang/codebase/HRI_MLLM/data/beat_english_v0.2.1/30/30_katya_0_2_2.wav"
-# audio2audio
-messages = [
-    {"role": "user", "message_type": "text", "content": "Please transcribe the following audio:"},
-    {
-        "role": "user",
-        "message_type": "audio",
-        "content": audio_path,
-    }
-]
+audio_token_path =  "/root/pengyang/codebase/HRI_MLLM/data/BEAT_TTS_kimi/data/8_catherine_0_91_91_audio_tokens.pt"
+train_data_feature = np.load(f"/root/pengyang/codebase/HRI_MLLM/data/BEAT_TTS/new_joint_vecs/8_catherine_0_91_91_joint_vecs.npy")
 
-wav, audio_tokens, text = model.generate(messages, **sampling_params, output_type="both")
 
-sf.write(
-    "output.wav",
-    wav.detach().cpu().view(-1).numpy(),
-    24000,
-)
-print(">>> output text: ", text)
+audio_tokens = torch.load(audio_token_path).squeeze(0) - 152064
+
+
 ## Use a local HuggingFace model to inference.
 
 
@@ -222,12 +193,32 @@ motion_pkl = audioToken2motionPkl(audio_tokens)
 
 
 
+
+
+
+motion_tokens = motion_vae.encode(normalize_features(torch.from_numpy(train_data_feature).unsqueeze(0).to("cuda:0")))[0].detach().cpu()
+
+decoded_features = motion_vae.decode(motion_tokens.to("cuda:0")).detach().cpu()
+
+decoded_data_pkl = feats2datapkl(decoded_features)
+source_data_pkl = feats2datapkl(normalize_features(torch.from_numpy(train_data_feature).unsqueeze(0)))
+
+
+with open("source.pkl", 'wb') as f:
+    pickle.dump(source_data_pkl, f)
+with open("decoded.pkl", 'wb') as f:
+    pickle.dump(decoded_data_pkl, f)
 with open("output.pkl", 'wb') as f:
     pickle.dump(motion_pkl, f)
+    
 
-
+source_csv =  load_motion_pkl_as_csv_data("source.pkl")
+decoded_csv =  load_motion_pkl_as_csv_data("decoded.pkl")
 motion_csv =  load_motion_pkl_as_csv_data("output.pkl")
 
+
+np.savetxt("source.csv", source_csv, delimiter=',', fmt='%.8f')
+np.savetxt("decoded.csv", decoded_csv, delimiter=',', fmt='%.8f')
 np.savetxt("llm.csv", motion_csv, delimiter=',', fmt='%.8f')
 
 

@@ -68,6 +68,7 @@ decoded_data_dict_list = []
 with torch.no_grad():
         
     for idx in range(10):
+        ### TODO: seems lack normalization?
         test_sample = torch.from_numpy(train_dataset[idx][1]).unsqueeze(0).cuda()
         text = train_dataset[idx][0]
         code = motion_vae.encode(test_sample)

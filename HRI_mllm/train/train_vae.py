@@ -10,7 +10,6 @@ from HRI_mllm.model.motion_encoder.vqvae import VQVae
 from HRI_mllm.datasets.G1ML3D import G1ML3DDataModule
 from HRI_mllm.utils.motion_utils.g1ml3d import feats2joints
 from HRI_mllm.utils.motion_utils.metrics import calc_mpjpe, calc_pampjpe
-from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.io.g1_29_humanml3d_representation import vec_to_data_pkl
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
