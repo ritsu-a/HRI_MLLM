@@ -3,7 +3,7 @@ import torch
 import os 
 from os.path import join as pjoin
 # from .humanml.utils.word_vectorizer import WordVectorizer
-from HRI_mllm.utils.motion_utils.g1ml3d import (process_file, recover_from_ric)
+from HRI_mllm.utils.motion_utils.g1ml3d import recover_from_ric
 from .BaseDataModule import BASEDataModule
 from .T2M_dataset import Text2MotionDataset
 # from .humanml import Text2MotionDatasetEval, Text2MotionDataset, Text2MotionDatasetCB, MotionDataset, MotionDatasetVQ, Text2MotionDatasetToken, Text2MotionDatasetM2T
@@ -135,7 +135,7 @@ class G1ML3DDataModule(BASEDataModule):
             raise ValueError(f"Unknown stage: {self.hparams.stage}")
         # Get additional info of the dataset
         # self._sample_set = self.get_sample_set(overrides={"split": "test", "tiny": True})
-        self.nfeats = kwargs.get("nfeats", 280)
+        self.nfeats = kwargs.get("nfeats", 179)
 
         
         
@@ -146,12 +146,6 @@ class G1ML3DDataModule(BASEDataModule):
         features = features * std + mean
         return recover_from_ric(features)
 
-    def joints2feats(self, features):
-        example_data = np.load(os.path.join(self.hparams.data_root, 'joints', '000021.npy'))
-        example_data = example_data.reshape(len(example_data), -1, 3)
-        example_data = torch.from_numpy(example_data)
-        features = process_file(features, self.njoints, example_data, 't2m')[0]
-        return features
 
     def normalize(self, features):
         mean = torch.tensor(self.hparams.mean).to(features)

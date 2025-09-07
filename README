@@ -9,18 +9,24 @@ Install:
     git checkout g1_hri_mllm(maybe not need this line?)
     pip install -e .
 
-Compute joint_vec for g1ml3d:
+Compute joint_vec:
     python HRI_mllm/external/HRI_retarget/HRI_retarget/scripts/g1ml3d_motion_representation.py 
-    python HRI_mllm/external/HRI_retarget/HRI_retarget/utils/io/humanml3d_mean_variance.py
+    python HRI_mllm/external/HRI_retarget/HRI_retarget/utils/io/inspirehand_mean_variance.py
+
+    remember to change path in /root/pengyang/codebase/HRI_MLLM/HRI_mllm/utils/motion_utils/g1ml3d.py
     copy texts folder
 
 
 Train motion VQVAE:
     python HRI_mllm/train/train_vae.py
-
+    TODO: fix /root/pengyang/codebase/HRI_MLLM/HRI_mllm/datasets/G1ML3D.py remove all cfg dependency
 
 VQVAE:
     python HRI_mllm/scripts/test_motion_encoder.py
+
+
+Generate tokens for dataset:
+    python HRI_mllm/scripts/generate_motion_tokens.py
 
 
 

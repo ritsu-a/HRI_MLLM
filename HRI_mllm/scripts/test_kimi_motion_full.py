@@ -207,7 +207,10 @@ messages = [
     }
 ]
 
+
 wav, audio_tokens, text = model.generate(messages, **sampling_params, output_type="both")
+
+import ipdb;ipdb.set_trace()
 
 sf.write(
     "output.wav",

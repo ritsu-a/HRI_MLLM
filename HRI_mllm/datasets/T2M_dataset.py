@@ -151,7 +151,7 @@ class Text2MotionDataset(data.Dataset):
                         new_name_list.append(name)
                         length_list.append(len(motion))
                     
-                    if dataset_name in ['BEAT_TTS']:
+                    if dataset_name in ['BEAT_TTS', 'BEAT_v1_kimi']:
                         data_dict[name] = {
                             'motion': motion,
                             "length": len(motion),

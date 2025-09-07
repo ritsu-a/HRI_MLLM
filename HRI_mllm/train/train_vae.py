@@ -33,24 +33,14 @@ def collate_fn(batch):
     
 def load_dataset():
     dataset = G1ML3DDataModule(stage="vae", split="train", 
-                               nfeats=280,
-                               data_root=os.path.join(DATA_ROOT, "BEAT_TTS"),
-                               dis_data_root=os.path.join(DATA_ROOT, "G1ML3D_v1"), ### mean and std
-                               dataset_name="BEAT_TTS",
+                               nfeats=179,
+                               data_root=os.path.join(DATA_ROOT, "BEAT_v1_kimi"),
+                               dis_data_root=os.path.join(DATA_ROOT, "BEAT_v1_kimi"), ### mean and std
+                               dataset_name="BEAT_v1_kimi",
                                )
     train_dataset = dataset.train_dataset
     val_dataset = dataset.val_dataset
-    # for _, motions, length, _, _, _, _, name, idx in train_dataset:
-    #     motions = torch.from_numpy(motions)
-    #     if motions.isnan().any():
-    #         print("Found NaN in motion data")
-    #         import ipdb;ipdb.set_trace()
-    #     if motions.shape[0] < 64:
-    #         print(f"Skipping motion with length {motions.shape[0]}")
-    #         continue
-    #     if motions.shape[1] != 280:  # 确保关节数量正确
-    #         print(f"Skipping motion with incorrect joint count: {motions.shape[1]}")
-    #         continue
+
     
 
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4, collate_fn=collate_fn)
@@ -172,7 +162,7 @@ def train_vqvae(config, train_loader, val_loader):
         
         # 保存模型 checkpoint
         if epoch % 5 == 0:
-            torch.save(motion_vae.state_dict(), f"output/VQVAE/checkpoints/vqvae_epoch_{epoch}.pt")
+            torch.save(motion_vae.state_dict(), f"output/VQVAE_body/checkpoints/vqvae_epoch_{epoch}.pt")
             wandb.save(f"vqvae_epoch_{epoch}.pt")  # 上传到 wandb
     
     return motion_vae
@@ -180,7 +170,7 @@ def train_vqvae(config, train_loader, val_loader):
 # 主函数
 if __name__ == "__main__":
     # 加载配置
-    motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "g1_vqvae.yaml"))
+    motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "g1_vqvae_body.yaml"))
     motion_config["epochs"] = 500  # 训练 epoch 数
     motion_config["lr"] = 1e-4   # 学习率
     
