@@ -10,4 +10,4 @@ dilation_growth_rate: 3
 norm: None
 activation: relu
 nfeats: 179
-ckpt: ""
+ckpt: "/root/pengyang/codebase/HRI_MLLM/output/VQVAE_body/vqvae_final.pt"

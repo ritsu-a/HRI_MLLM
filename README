@@ -26,7 +26,7 @@ VQVAE:
 
 
 Generate tokens for dataset:
-    python HRI_mllm/scripts/generate_motion_tokens.py
+    python HRI_mllm/datasets/BEAT_preprocess/generate_tokens.py
 
 
 
@@ -36,7 +36,7 @@ Train motion adaptor:
 
     then 
         python -m torch.distributed.launch --nproc_per_node=8 --nnodes=1 --node_rank=0 \
-            HRI_mllm/train/train_motion_adaptor.py \
+            HRI_mllm/train/train_motion_adaptor.py 
 
 
 Inference with gpt2 motion adaptor:

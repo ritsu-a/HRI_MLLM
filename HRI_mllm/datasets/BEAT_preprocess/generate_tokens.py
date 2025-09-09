@@ -15,7 +15,7 @@ from scipy.spatial.transform import Slerp
 from scipy.spatial.transform import Rotation as R
 
 from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.torch_utils.diff_quat import vec6d_to_quat
-from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.io.g1_29_humanml3d_representation import data_pkl_to_vec
+from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.io.inspirehand_representation import data_pkl_to_vec
 
 from HRI_mllm.model.qwen2_5omni import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
 from HRI_mllm.utils.qwen_omni_utils import process_mm_info, process_audio_info
@@ -62,18 +62,6 @@ def load_token2wav():
     return token2wav_adapter
 
 
-def interpolate_tensor(tensor, target_length):
-    ### tensor (num_frames, channels)
-    input_tensor = tensor.permute(1, 0).unsqueeze(0)
-    resized_tensor = F.interpolate(
-        input_tensor, 
-        size=target_length, 
-        mode='linear',  # 线性插值
-        align_corners=True
-    )
-    result = resized_tensor.squeeze(0).permute(1, 0)
-    return result
-
 def interpolate_quat(quat, target_length):
     ### tensor(num_frames, xyzw)
     quats = quat.numpy() if torch.is_tensor(quat) else quat
@@ -93,14 +81,13 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--audio_path", type=str, default="/root/pengyang/codebase/HRI_MLLM/data/beat_english_v0.2.1/all.txt")
-    parser.add_argument("--motion_root", type=str, default="/root/pengyang/codebase/HRI_MLLM/data/motion/g1/BEAT")
-    parser.add_argument("--save_path", type=str, default="/root/pengyang/codebase/HRI_MLLM/data/BEAT_TTS_kimi")
+    parser.add_argument("--motion_root", type=str, default="/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1")
+    parser.add_argument("--save_path", type=str, default="/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi")
     parser.add_argument("--model_name_or_path", type=str, default="moonshotai/Kimi-Audio-7B")
 
 
     args = parser.parse_args()
     save_split_path = os.path.join(args.save_path, "all.txt")
-    joint_vecs_save_path = os.path.join(args.save_path, "new_joint_vecs")
     save_path = os.path.join(args.save_path, "data")
 
     with open(save_split_path, "w", encoding="utf-8") as f:
@@ -124,7 +111,7 @@ if __name__ == "__main__":
         with open(path, 'r', encoding="utf-8") as file:
             data = yaml.safe_load(file)
         return data        
-    motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "g1_vqvae.yaml"))
+    motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "g1_vqvae_body.yaml"))
     motion_vae = VQVae(**motion_config)
     state_dict = torch.load(motion_config["ckpt"], map_location="cpu", weights_only=False)
     motion_vae.load_state_dict(state_dict, strict=True)
@@ -150,7 +137,7 @@ if __name__ == "__main__":
     for idx in tqdm(range(total_num)):
 
         source_audio_path = audio_files[idx].strip()
-        motion_path = os.path.join(args.motion_root, source_audio_path.split("/")[-1].replace(".wav", ".pickle"))
+        motion_path = os.path.join(args.motion_root, source_audio_path.split("/")[-2], source_audio_path.split("/")[-1].replace(".wav", ".pickle"))
         filename = source_audio_path.split("/")[-1]
 
         audio_path = source_audio_path
@@ -167,31 +154,20 @@ if __name__ == "__main__":
             motion_pkl = pickle.load(file)
 
 
-        ### resample motion pkl to match the tts audio length
-        target_motion_frames = int(kimi_tokens.shape[1] / 50 * 4 * 20)
 
-        resampled_angles = interpolate_tensor(torch.from_numpy(motion_pkl["angles"]), target_motion_frames)
-        motion_pkl_resampled = {
-            "fps": 20,
-            "angles": torch.cat([resampled_angles[:, :22], resampled_angles[:, 34:41]], dim=1),
-            "global_rotation": interpolate_quat(vec6d_to_quat(torch.from_numpy(motion_pkl["global_rotation"])), target_motion_frames),
-            "global_translation": interpolate_tensor(torch.from_numpy(motion_pkl["global_translation"]).squeeze(-1), target_motion_frames).unsqueeze(-1),
-            "robot_name": "g1_29",
-            "scale": torch.ones(3),
-        }
-
-        g1ml3d_features = data_pkl_to_vec(motion_pkl_resampled)
+        g1ml3d_vec = data_pkl_to_vec(motion_pkl)
 
         # np.save(os.path.join(joint_vecs_save_path, filename.replace(".wav", "_joint_vecs.npy")), g1ml3d_features)
 
 
-        from HRI_mllm.utils.motion_utils.g1ml3d import normalize_features, feats2datapkl
+        from HRI_mllm.utils.motion_utils.g1ml3d import normalize_vec
         
-        motion_tokens = motion_vae.encode(normalize_features(torch.from_numpy(g1ml3d_features).unsqueeze(0).to("cuda:0")))[0].detach().cpu()
+        motion_tokens = motion_vae.encode(normalize_vec(torch.from_numpy(g1ml3d_vec).unsqueeze(0).to("cuda:0")))[0].detach().cpu()
 
 
         audio_token_save_path = os.path.join(save_path, filename.replace(".wav", "_audio_tokens.pt"))
         motion_token_save_path = os.path.join(save_path, filename.replace(".wav", "_motion_tokens.pt"))
+
 
         torch.save(kimi_tokens, audio_token_save_path)
         torch.save(motion_tokens, motion_token_save_path)
@@ -200,19 +176,6 @@ if __name__ == "__main__":
         with open(save_split_path, "a", encoding="utf-8") as f:
             f.write(audio_token_save_path + "\n")  
 
-
-        # decoded_features = motion_vae.decode(motion_tokens.to("cuda:0")).detach().cpu()
-        # data_dict_decoded = feats2datapkl(decoded_features)
-
-
-        # with open(os.path.join(save_path, filename.replace(".wav", "_decoded.pkl")), 'wb') as f:
-        #     pickle.dump(data_dict_decoded, f)
-
-        # with torch.no_grad():
-        #     decoded_audio = token2wav(audio_tokens.to("cuda:0"))
-
-        # sf.write(os.path.join(save_path, filename.replace(".wav", "_decoded.wav")), decoded_audio.detach().cpu().numpy(), 24000)
-        # import ipdb;ipdb.set_trace()
 
 
         

@@ -26,36 +26,36 @@ if local_rank == 0:
     wandb.init(
         project="audio-motion-BEAT-gpt2",
         config={
-            "beat_tts_root": "/root/pengyang/codebase/HRI_MLLM/data/BEAT_TTS_kimi",
+            "beat_tts_root": "/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi",
             "audio_vocab_size": 16384,
             "motion_vocab_size": 512,
             "total_vocab_size": 16384 + 512,
-            "max_seq_length": 1024,
+            "max_seq_length": 4096,
             "min_seq_length": 128,
             "batch_size": 32,
             "learning_rate": 5e-5,
             "epochs": 100,
             "sliding_window_step": 32,
             "pad_token_id": 16384 + 512,
-            "interleave_ratio": [5, 2],
+            "interleave_ratio": [1, 1],
         }
     )
     config = wandb.config
 else:
     # 非主进程使用相同的配置
     config = type('Config', (), {
-        "beat_tts_root": "/root/pengyang/codebase/HRI_MLLM/data/BEAT_TTS_kimi",
+        "beat_tts_root": "/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi",
         "audio_vocab_size": 16384,
         "motion_vocab_size": 512,
         "total_vocab_size": 16384 + 512,
-        "max_seq_length": 1024,
+        "max_seq_length": 4096,
         "min_seq_length": 128,
         "batch_size": 32,
         "learning_rate": 5e-5,
         "epochs": 100,
         "sliding_window_step": 32,
         "pad_token_id": 16384 + 512,
-        "interleave_ratio": [5, 2],
+        "interleave_ratio": [1, 1],
     })()
 
 # 创建模型
@@ -72,11 +72,11 @@ model_config = GPT2Config(
 )
 model = GPT2LMHeadModel(model_config)
 
-# 扩展位置编码
-if config.max_seq_length > 1024:
-    if local_rank == 0:
-        print("扩展位置编码...")
-    model.resize_position_embeddings(config.max_seq_length)
+# # 扩展位置编码
+# if config.max_seq_length > 1024:
+#     if local_rank == 0:
+#         print("扩展位置编码...")
+#     model.resize_position_embeddings(config.max_seq_length)
 
 # 将模型移到当前GPU
 device = torch.device(f'cuda:{local_rank}')
@@ -212,7 +212,7 @@ for epoch in range(config.epochs):
         
         # 保存检查点
         if (epoch + 1) % 2 == 0:
-            ckpt_path = f"output/motion_adaptor/checkpoints/epoch_{epoch+1}.pt"
+            ckpt_path = f"output/motion_adaptor_v1/checkpoints/epoch_{epoch+1}.pt"
             torch.save({
                 'epoch': epoch,
                 'model_state': model.module.state_dict(),
@@ -222,8 +222,8 @@ for epoch in range(config.epochs):
 
 # 保存最终模型
 if local_rank == 0:
-    model.module.save_pretrained("output/motion_adaptor/kimi_audio_motion_gpt2_v1")
-    wandb.save("output/motion_adaptor/kimi_audio_motion_gpt2_v1/*")
+    model.module.save_pretrained("output/motion_adaptor_v1/kimi_audio_motion_gpt2_v2")
+    wandb.save("output/motion_adaptor_v1/kimi_audio_motion_gpt2_v2/*")
 
 # 清理分布式进程
 dist.destroy_process_group()
