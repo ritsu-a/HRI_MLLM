@@ -32,9 +32,9 @@ if local_rank == 0:
             "total_vocab_size": 16384 + 512,
             "max_seq_length": 4096,
             "min_seq_length": 128,
-            "batch_size": 32,
+            "batch_size": 8,
             "learning_rate": 5e-5,
-            "epochs": 100,
+            "epochs": 2000,
             "sliding_window_step": 32,
             "pad_token_id": 16384 + 512,
             "interleave_ratio": [1, 1],
@@ -50,9 +50,9 @@ else:
         "total_vocab_size": 16384 + 512,
         "max_seq_length": 4096,
         "min_seq_length": 128,
-        "batch_size": 32,
+        "batch_size": 8,
         "learning_rate": 5e-5,
-        "epochs": 100,
+        "epochs": 2000,
         "sliding_window_step": 32,
         "pad_token_id": 16384 + 512,
         "interleave_ratio": [1, 1],
@@ -62,10 +62,10 @@ else:
 model_config = GPT2Config(
     vocab_size=config.total_vocab_size + 1,
     n_positions=config.max_seq_length,
-    n_embd=768,
-    n_layer=12,
-    n_head=12,
-    n_inner=3072,
+    n_embd=1024,
+    n_layer=24,
+    n_head=16,
+    n_inner=4096,
     resid_pdrop=0.1,
     embd_pdrop=0.1,
     attn_pdrop=0.1,
@@ -222,8 +222,8 @@ for epoch in range(config.epochs):
 
 # 保存最终模型
 if local_rank == 0:
-    model.module.save_pretrained("output/motion_adaptor_v1/kimi_audio_motion_gpt2_v2")
-    wandb.save("output/motion_adaptor_v1/kimi_audio_motion_gpt2_v2/*")
+    model.module.save_pretrained("output/motion_adaptor_v1/kimi_audio_motion_gpt2_v4")
+    wandb.save("output/motion_adaptor_v1/kimi_audio_motion_gpt2_v4/*")
 
 # 清理分布式进程
 dist.destroy_process_group()

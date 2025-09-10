@@ -40,7 +40,7 @@ import torch
 
 
 
-def audioToken2motionPkl(audio_codes):
+def audioToken2motionPkl(audio_codes, motion_tokens_gt):
     """
     Convert audio codes to motion codes.
     """
@@ -49,7 +49,7 @@ def audioToken2motionPkl(audio_codes):
         "audio_vocab_size": 16384,
         "motion_vocab_size": 512,
         "total_vocab_size": 16384 + 512,
-        "max_seq_length": 1024,
+        "max_seq_length": 4096,
         "min_seq_length": 128,
         "batch_size": 32,
         "learning_rate": 5e-5,
@@ -60,7 +60,7 @@ def audioToken2motionPkl(audio_codes):
     }
     config = SimpleNamespace(**config)
 
-    def generate_for_long_audio(audio_tokens, model, device, max_length=1024):
+    def generate_for_long_audio(audio_tokens, motion_tokens_gt, model, device, max_length=4096):
         model.eval()
         generated = []
         current_seq = []
@@ -70,46 +70,33 @@ def audioToken2motionPkl(audio_codes):
         
         with torch.no_grad():
             for i, token in enumerate(audio_tokens):
+                
                 current_seq.append(token)
                 
-                # 每5个audio token尝试生成motion
-                if (i + 1) % interleave_audios == 0:
-                    # 当序列过长时使用滑动窗口
-                    if len(current_seq) > max_context:
-                        # 保留最近的完整上下文
-                        keep_from = max(0, len(current_seq) - max_context)
-                        # 确保从完整单元开始
-                        while keep_from < len(current_seq) and (keep_from % (interleave_audios + interleave_motions) != 0):
-                            keep_from += 1
-                        current_seq = current_seq[keep_from:]
-                    
-                    
-                    
-                    # 预测下一个motion token
-                    for _ in range(interleave_motions):
-                        inputs = torch.tensor([current_seq]).to(device)
-                        attn_mask = torch.ones_like(inputs).float().to(device)
+                inputs = torch.tensor([current_seq]).to(device)
+                attn_mask = torch.ones_like(inputs).float().to(device)
 
-                        output = model(inputs, attention_mask=attn_mask)
-                        next_token_logits = output.logits[0, -1, :]
-                        
-                        # 限制在motion词表范围内
-                        motion_logits = next_token_logits[config.audio_vocab_size:]
-                        next_token = torch.argmax(motion_logits).item() + config.audio_vocab_size
-                        
-                        generated.append(next_token)
-                        current_seq.append(next_token)  # 添加到上下文
-                        motion_count += 1
-
+                output = model(inputs, attention_mask=attn_mask)
+                next_token_logits = output.logits[0, -1, :]
                 
+                # 限制在motion词表范围内
+                motion_logits = next_token_logits[config.audio_vocab_size:]
+                next_token = torch.argmax(motion_logits).item() + config.audio_vocab_size
+                
+                generated.append(next_token)
+                current_seq.append(next_token)  # 添加到上下文
+                motion_count += 1
+
                 if len(current_seq) >= max_length:
                     break
+                if motion_count >= len(motion_tokens_gt):
+                    break   
         
         # 提取生成的motion tokens
         motion_tokens = [t - config.audio_vocab_size for t in generated]
         return motion_tokens
     
-    motion_tokens = generate_for_long_audio(audio_codes.squeeze(0), motion_adaptor, device=motion_adaptor.device)
+    motion_tokens = generate_for_long_audio(audio_codes.squeeze(0), motion_tokens_gt.squeeze(0), motion_adaptor, device=motion_adaptor.device)
 
 
     decoded = motion_vae.decode(torch.tensor(motion_tokens).unsqueeze(0).to("cuda"))
@@ -118,9 +105,7 @@ def audioToken2motionPkl(audio_codes):
     return data_dict_decoded, motion_tokens
 
 
-
-### loading motion adaptor
-motion_adaptor = GPT2LMHeadModel.from_pretrained("output/motion_adaptor_v1/kimi_audio_motion_gpt2_v2", device_map="auto")
+motion_adaptor = GPT2LMHeadModel.from_pretrained("output/motion_adaptor_v1/kimi_audio_motion_gpt2_v3", device_map="auto")
 
 ### loading motion VQVAE
 def open_yaml(path):
@@ -148,12 +133,12 @@ audio_tokens = torch.load(audio_token_path).squeeze(0) - 152064
 ## Use a local HuggingFace model to inference.
 
 
-motion_pkl, llm_motion_tokens = audioToken2motionPkl(audio_tokens)
 
 
 motion_tokens = motion_vae.encode(normalize_vec(torch.from_numpy(train_data_feature).unsqueeze(0).to("cuda:0")))[0].detach().cpu()
 
-import ipdb;ipdb.set_trace()
+motion_pkl, llm_motion_tokens = audioToken2motionPkl(audio_tokens, motion_tokens)
+
 
 decoded_features = motion_vae.decode(motion_tokens.to("cuda:0")).detach().cpu()
 
