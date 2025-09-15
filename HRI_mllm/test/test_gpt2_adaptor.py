@@ -23,6 +23,8 @@ import os
 import sys
 import pickle
 
+from HRI_mllm.model.gpt2_adaptor.model import MixedInputGPT2
+
 from transformers import GPT2Config, GPT2LMHeadModel
 from types import SimpleNamespace
 import soundfile as sf
@@ -37,7 +39,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from pydub import AudioSegment
 
 import torch
-
+torch.cuda.set_device(0)
 
 
 def audioToken2motionPkl(audio_codes, motion_tokens_gt):
@@ -67,24 +69,28 @@ def audioToken2motionPkl(audio_codes, motion_tokens_gt):
         motion_count = 0
         max_context = max_length - 50  # 保留空间生成新token
         interleave_audios, interleave_motions = config.interleave_ratio
+        token_labels = []
         
         with torch.no_grad():
             for i, token in enumerate(audio_tokens):
                 
                 current_seq.append(token)
+                token_labels.append(-100)  # audio token对应的label为-100
                 
                 inputs = torch.tensor([current_seq]).to(device)
-                attn_mask = torch.ones_like(inputs).float().to(device)
+                attn_mask = torch.ones_like(inputs).to(dtype=torch.long).to(device)
+                labels = torch.tensor([token_labels]).to(device)
 
-                output = model(inputs, attention_mask=attn_mask)
+                output = model(inputs, attention_mask=attn_mask, labels=labels)
                 next_token_logits = output.logits[0, -1, :]
                 
                 # 限制在motion词表范围内
-                motion_logits = next_token_logits[config.audio_vocab_size:]
-                next_token = torch.argmax(motion_logits).item() + config.audio_vocab_size
+                motion_logits = next_token_logits
+                next_token = torch.argmax(motion_logits).item()
                 
                 generated.append(next_token)
-                current_seq.append(next_token)  # 添加到上下文
+                current_seq.append(motion_tokens_gt[i])  # 添加到上下文
+                token_labels.append(motion_tokens_gt[i])  # motion token对应的label为自身
                 motion_count += 1
 
                 if len(current_seq) >= max_length:
@@ -93,7 +99,7 @@ def audioToken2motionPkl(audio_codes, motion_tokens_gt):
                     break   
         
         # 提取生成的motion tokens
-        motion_tokens = [t - config.audio_vocab_size for t in generated]
+        motion_tokens = [t for t in generated]
         return motion_tokens
     
     motion_tokens = generate_for_long_audio(audio_codes.squeeze(0), motion_tokens_gt.squeeze(0), motion_adaptor, device=motion_adaptor.device)
@@ -105,7 +111,7 @@ def audioToken2motionPkl(audio_codes, motion_tokens_gt):
     return data_dict_decoded, motion_tokens
 
 
-motion_adaptor = GPT2LMHeadModel.from_pretrained("output/motion_adaptor_v1/kimi_audio_motion_gpt2_v3", device_map="auto")
+motion_adaptor = MixedInputGPT2.from_pretrained("output/motion_adaptor_v1/kimi_audio_motion_gpt2_hidden_30_100", device_map="auto")
 
 ### loading motion VQVAE
 def open_yaml(path):
@@ -121,7 +127,7 @@ motion_vae.to(device="cuda")
 
 
 
-filename = "1_wayne_0_1_1"
+filename = "3_solomon_0_1_1"
 audio_token_path =  f"/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi/data/{filename}_audio_tokens.pt"
 train_data_feature = np.load(f"/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi/new_joint_vecs/{filename}.npy")
 audio_path = f"/root/pengyang/codebase/HRI_MLLM/data/beat_english_v0.2.1/{filename.split('_')[0]}/{filename}.wav"

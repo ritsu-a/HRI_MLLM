@@ -24,7 +24,7 @@ class KimiAudio(object):
         else:
             # cache everything if model_path is a model-id
             cache_path = snapshot_download(model_path)
-    
+
         logger.info(f"Looking for resources in {cache_path}")
         logger.info(f"Loading whisper model")
         self.alm = MoonshotKimiaForCausalLM.from_pretrained(

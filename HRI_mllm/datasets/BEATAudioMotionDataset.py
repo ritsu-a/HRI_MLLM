@@ -32,7 +32,7 @@ class BEATAudioMotionDataset(Dataset):
                 continue
             
             # 读取音频和动作token
-            audio_tokens = torch.load(audio_token_save_path).squeeze(0) - 152064  # 152064是kimi音频token的起始ID
+            audio_tokens = torch.load(audio_token_save_path).squeeze(0)
             motion_tokens = torch.load(motion_token_save_path).squeeze(0)    
 
 
@@ -46,7 +46,7 @@ class BEATAudioMotionDataset(Dataset):
                 
                 if (i + 1) % self.interleave_audios == 0 and i // self.interleave_audios * self.interleave_motions + self.interleave_motions - 1  < len(motion_tokens):
                     for _ in range(self.interleave_motions):
-                        full_sequence.append(motion_tokens[i//self.interleave_audios * self.interleave_motions + _] + config.audio_vocab_size)
+                        full_sequence.append(motion_tokens[i//self.interleave_audios * self.interleave_motions + _])
                         token_types.append(1)
             
             # 存储原始长序列

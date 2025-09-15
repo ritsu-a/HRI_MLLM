@@ -39,6 +39,10 @@ Train motion adaptor:
             HRI_mllm/train/train_motion_adaptor.py 
 
 
+Test motion adaptor:
+    CUDA_VISIBLE_DEVICES=0 python HRI_mllm/test/test_gpt2_adaptor.py
+    ### TODO: now audio_tokenizer seems to be loaded on the wrong device.
+
 Inference with gpt2 motion adaptor:
     CUDA_VISIBLE_DEVICES=0,1 python HRI_mllm/scripts/test_qwen2_5omni_motion_full.py 
 

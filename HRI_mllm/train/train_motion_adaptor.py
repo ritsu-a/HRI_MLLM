@@ -9,6 +9,13 @@ import wandb
 import math
 from tqdm import tqdm
 from HRI_mllm.datasets.BEATAudioMotionDataset import BEATAudioMotionDataset
+from HRI_mllm.model.gpt2_adaptor.model import MixedInputGPT2
+
+exp_name = "kimi_audio_motion_gpt2_hidden_30_100"
+os.makedirs(os.path.join("output/motion_adaptor_v1", exp_name), exist_ok=True)
+os.makedirs(os.path.join("output/motion_adaptor_v1", exp_name, "checkpoints"), exist_ok=True)
+
+os.environ["WANDB_MODE"] = "offline"
 
 # 初始化分布式训练环境
 def setup_distributed():
@@ -21,23 +28,25 @@ def setup_distributed():
 # 获取全局rank
 local_rank, world_size = setup_distributed()
 
+
 # 只在主进程初始化Weights & Biases
 if local_rank == 0:
     wandb.init(
-        project="audio-motion-BEAT-gpt2",
+        project="audio-motion-BEAT-gpt2-adaptor",
         config={
             "beat_tts_root": "/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi",
             "audio_vocab_size": 16384,
             "motion_vocab_size": 512,
-            "total_vocab_size": 16384 + 512,
+            "total_vocab_size": 512 + 2,
             "max_seq_length": 4096,
             "min_seq_length": 128,
             "batch_size": 8,
-            "learning_rate": 5e-5,
-            "epochs": 2000,
+            "learning_rate": 1e-4,
+            "epochs": 1000,
             "sliding_window_step": 32,
-            "pad_token_id": 16384 + 512,
+            "pad_token_id": 513,
             "interleave_ratio": [1, 1],
+            "exp_name": exp_name,
         }
     )
     config = wandb.config
@@ -47,36 +56,32 @@ else:
         "beat_tts_root": "/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi",
         "audio_vocab_size": 16384,
         "motion_vocab_size": 512,
-        "total_vocab_size": 16384 + 512,
+        "total_vocab_size": 512 + 2,
         "max_seq_length": 4096,
         "min_seq_length": 128,
         "batch_size": 8,
-        "learning_rate": 5e-5,
-        "epochs": 2000,
+        "learning_rate": 1e-4,
+        "epochs": 1000,
         "sliding_window_step": 32,
-        "pad_token_id": 16384 + 512,
+        "pad_token_id": 513,
         "interleave_ratio": [1, 1],
+        "exp_name":exp_name,
     })()
 
 # 创建模型
 model_config = GPT2Config(
-    vocab_size=config.total_vocab_size + 1,
+    vocab_size=config.total_vocab_size,
     n_positions=config.max_seq_length,
-    n_embd=1024,
-    n_layer=24,
-    n_head=16,
-    n_inner=4096,
+    n_embd=768,
+    n_layer=12,
+    n_head=12,
+    n_inner=3072,
     resid_pdrop=0.1,
     embd_pdrop=0.1,
     attn_pdrop=0.1,
 )
-model = GPT2LMHeadModel(model_config)
-
-# # 扩展位置编码
-# if config.max_seq_length > 1024:
-#     if local_rank == 0:
-#         print("扩展位置编码...")
-#     model.resize_position_embeddings(config.max_seq_length)
+model = MixedInputGPT2(model_config)
+# model = MixedInputGPT2.from_pretrained("output/motion_adaptor_v1/kimi_audio_motion_gpt2_v5", device_map="auto")
 
 # 将模型移到当前GPU
 device = torch.device(f'cuda:{local_rank}')
@@ -87,7 +92,7 @@ model = torch.nn.parallel.DistributedDataParallel(
     model, 
     device_ids=[local_rank],
     output_device=local_rank,
-    find_unused_parameters=False  # 改为False以消除警告
+    find_unused_parameters=True  # 改为False以消除警告
 )
 
 # 只在主进程记录模型
@@ -183,7 +188,7 @@ for epoch in range(config.epochs):
         total_loss += loss.item() * accum_steps
         
         # 只在主进程记录指标
-        if local_rank == 0 and step % 1000 == 0:
+        if local_rank == 0 and {step % 1000 == 0 or step == len(dataloader) - 1}:
             log_data = {
                 "train/loss": loss.item() * accum_steps,
                 "train/lr": scheduler.get_last_lr()[0],
@@ -211,8 +216,8 @@ for epoch in range(config.epochs):
         print(f"Epoch {epoch+1}/{config.epochs} | Loss: {avg_loss:.4f}")
         
         # 保存检查点
-        if (epoch + 1) % 2 == 0:
-            ckpt_path = f"output/motion_adaptor_v1/checkpoints/epoch_{epoch+1}.pt"
+        if (epoch + 1) % 50 == 0:
+            ckpt_path = f"output/motion_adaptor_v1/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
             torch.save({
                 'epoch': epoch,
                 'model_state': model.module.state_dict(),
@@ -222,8 +227,7 @@ for epoch in range(config.epochs):
 
 # 保存最终模型
 if local_rank == 0:
-    model.module.save_pretrained("output/motion_adaptor_v1/kimi_audio_motion_gpt2_v4")
-    wandb.save("output/motion_adaptor_v1/kimi_audio_motion_gpt2_v4/*")
+    model.module.save_pretrained(f"output/motion_adaptor_v1/{config.exp_name}")
 
 # 清理分布式进程
 dist.destroy_process_group()

@@ -62,20 +62,6 @@ def load_token2wav():
     return token2wav_adapter
 
 
-def interpolate_quat(quat, target_length):
-    ### tensor(num_frames, xyzw)
-    quats = quat.numpy() if torch.is_tensor(quat) else quat
-
-    old_times = np.linspace(0, 1, len(quats))
-    slerp = Slerp(old_times, R.from_quat(quats))
-
-    new_times = np.linspace(0, 1, target_length)
-
-    interp_rots = slerp(new_times).as_matrix() 
-    interp_rots_tensor = torch.tensor(interp_rots, dtype=quat.dtype)
-    return interp_rots_tensor[:, :, :2]
-
-
 
 if __name__ == "__main__":
 
