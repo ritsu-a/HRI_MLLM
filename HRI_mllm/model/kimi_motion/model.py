@@ -915,3 +915,433 @@ class MoonshotKimiaForCausalLM(Qwen2PreTrainedModel):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+    
+
+class MoonshotKimiaMotionModel(Qwen2PreTrainedModel):
+    """
+    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`QwenDecoderLayer`]
+
+    Args:
+        config: KimiAudioConfig
+    """
+
+    config_class = KimiAudioConfig
+
+    def __init__(self, config: KimiAudioConfig):
+        super().__init__(config)
+        self.padding_idx = config.pad_token_id
+        self.vocab_size = config.vocab_size
+        self.kimia_mimo_transformer_from_layer_index = (
+            config.kimia_mimo_transformer_from_layer_index
+        )
+
+        self.embed_tokens = nn.Embedding(
+            config.vocab_size, config.hidden_size, self.padding_idx
+        )
+        self.layers = nn.ModuleList(
+            [MoonshotDecoderLayer(config) for _ in range(config.num_hidden_layers)]
+        )
+        self.norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        # extra 1B audio transformers
+        self.mimo_layers = nn.ModuleList(
+            [MoonshotDecoderLayer(config) for _ in range(config.kimia_mimo_layers)]
+        )
+        self.mimo_norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        # extra 1B motion transformers
+        self.motion_layers = nn.ModuleList(
+            [MoonshotDecoderLayer(config) for _ in range(config.kimia_mimo_layers)]
+        )
+        self.motion_norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        self.use_whisper_feature = config.use_whisper_feature
+        if self.use_whisper_feature:
+            self.vq_adaptor = VQAdaptor(config)
+        self.kimia_media_begin = config.kimia_media_begin
+        self.kimia_media_end = config.kimia_media_end
+
+        self.gradient_checkpointing = False
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def get_input_embeddings(self):
+        return self.embed_tokens
+
+    def set_input_embeddings(self, value):
+        self.embed_tokens = value
+
+    # Copied from transformers.models.bart.modeling_bart.BartDecoder._prepare_decoder_attention_mask
+    def _prepare_decoder_attention_mask(
+        self, attention_mask, input_shape, inputs_embeds, past_key_values_length
+    ):
+        # create causal mask
+        # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
+        combined_attention_mask = None
+        if input_shape[-1] > 1:
+            combined_attention_mask = _make_causal_mask(
+                input_shape,
+                inputs_embeds.dtype,
+                device=inputs_embeds.device,
+                past_key_values_length=past_key_values_length,
+            )
+
+        if attention_mask is not None:
+            # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
+            expanded_attn_mask = _expand_mask(
+                attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]
+            ).to(inputs_embeds.device)
+            combined_attention_mask = (
+                expanded_attn_mask
+                if combined_attention_mask is None
+                else expanded_attn_mask + combined_attention_mask
+            )
+
+        return combined_attention_mask
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        text_input_ids: torch.LongTensor = None,
+        whisper_input_feature: Optional[torch.FloatTensor] = None,
+        is_continuous_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[Tuple, BaseModelOutputWithPast]:
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
+        )
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
+        )
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
+
+        # retrieve input_ids and inputs_embeds
+        if input_ids is not None and inputs_embeds is not None:
+            raise ValueError(
+                "You cannot specify both input_ids and inputs_embeds at the same time"
+            )
+        elif input_ids is not None:
+            batch_size, seq_length = input_ids.shape
+        elif inputs_embeds is not None:
+            batch_size, seq_length, _ = inputs_embeds.shape
+        else:
+            raise ValueError("You have to specify either input_ids or inputs_embeds")
+
+        seq_length_with_past = seq_length
+        past_key_values_length = 0
+
+        if past_key_values is not None:
+            past_key_values_length = past_key_values[0][0].shape[2]
+            seq_length_with_past = seq_length_with_past + past_key_values_length
+        if position_ids is None:
+            device = input_ids.device if input_ids is not None else inputs_embeds.device
+            position_ids = torch.arange(
+                past_key_values_length,
+                seq_length + past_key_values_length,
+                dtype=torch.long,
+                device=device,
+            )
+            position_ids = position_ids.unsqueeze(0)
+
+        if inputs_embeds is None:
+            # shape: batch, seq_len, hidden_size
+            input_ids = input_ids.to(torch.cuda.current_device())
+            text_input_ids = text_input_ids.to(torch.cuda.current_device())
+            audio_emb = self.embed_tokens(input_ids)
+            if self.use_whisper_feature and whisper_input_feature is not None:
+                if not isinstance(whisper_input_feature, list):
+                    whisper_input_feature = whisper_input_feature.squeeze(0)
+                    whisper_input_feature = [whisper_input_feature]
+
+                media_start_idx = (input_ids == self.kimia_media_begin).nonzero()
+                media_end_idx = (input_ids == self.kimia_media_end).nonzero()
+                # shape: batch, seq_len, hidden_size
+                whisper_input_dim = whisper_input_feature[0].shape[-1]
+                whisper_dtype = whisper_input_feature[0].dtype
+                expanded_whisper = (
+                    torch.zeros(audio_emb.shape[1], whisper_input_dim)
+                    .to(torch.cuda.current_device())
+                    .to(whisper_dtype)
+                )
+                for (seg_idx, start_idx), (_, end_idx) in zip(
+                    media_start_idx, media_end_idx
+                ):
+                    # assert whisper_emb.shape[1] == end_idx - (start_idx + 1)
+
+                    feat_len = end_idx - (start_idx + 1)
+                    whisper_input_feature_i = whisper_input_feature[seg_idx].squeeze(0)
+                    assert feat_len == is_continuous_mask[seg_idx].sum()
+                    expanded_whisper[start_idx + 1 : end_idx, :] = (
+                        whisper_input_feature_i[:feat_len, :]
+                    )
+
+                expanded_whisper = expanded_whisper.unsqueeze(0)
+                whisper_emb = self.vq_adaptor(
+                    expanded_whisper.transpose(0, 1)
+                ).transpose(0, 1)
+                is_continuous_mask = is_continuous_mask.to(torch.cuda.current_device())
+                whisper_emb = whisper_emb.to(torch.cuda.current_device())
+                whisper_emb = whisper_emb * is_continuous_mask[:, :, None]
+
+                encoder_input_addwith_discrete_token = (
+                    audio_emb + whisper_emb
+                ) * torch.sqrt(
+                    torch.tensor(
+                        2.0, dtype=whisper_emb.dtype, device=torch.cuda.current_device()
+                    )
+                )
+                audio_emb = (
+                    audio_emb * (~is_continuous_mask[:, :, None])
+                    + encoder_input_addwith_discrete_token
+                    * is_continuous_mask[:, :, None]
+                )
+            if text_input_ids is not None and text_input_ids.sum() != 0:
+                inputs_embeds = audio_emb + self.embed_tokens(text_input_ids)
+            else:
+                inputs_embeds = audio_emb
+        # embed positions
+        # TODO kill attention_mask for prefill
+        padding_mask = attention_mask
+
+        hidden_states = inputs_embeds
+
+        # decoder layers
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attns = () if output_attentions else None
+        next_decoder_cache = () if use_cache else None
+        for idx, decoder_layer in enumerate(self.layers):
+            if output_hidden_states:
+                all_hidden_states += (hidden_states,)
+
+            past_key_value = (
+                past_key_values[idx] if past_key_values is not None else None
+            )
+            layer_outputs = decoder_layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                padding_mask=padding_mask,
+            )
+
+            hidden_states = layer_outputs[0]
+            if idx == self.kimia_mimo_transformer_from_layer_index:
+                mimo_hidden_states = hidden_states.clone()
+                motion_hidden_states = hidden_states.clone()
+
+            if use_cache:
+                next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
+
+            if output_attentions:
+                all_self_attns += (layer_outputs[1],)
+
+        hidden_states = self.norm(hidden_states)
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+
+        # apply audio transformer layers
+        for idx, decoder_layer in enumerate(self.mimo_layers):
+            if output_hidden_states:
+                all_hidden_states += (mimo_hidden_states,)
+
+            past_key_value = (
+                past_key_values[idx + len(self.layers)]
+                if past_key_values is not None
+                else None
+            )
+            layer_outputs = decoder_layer(
+                mimo_hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                padding_mask=padding_mask,
+            )
+
+            mimo_hidden_states = layer_outputs[0]
+
+            if use_cache:
+                next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
+
+        mimo_hidden_states = self.mimo_norm(mimo_hidden_states)
+
+        # add hidden states from the last decoder layer
+        if output_hidden_states:
+            all_hidden_states += (mimo_hidden_states,)
+
+
+         # apply motion transformer layers
+        for idx, decoder_layer in enumerate(self.motion_layers):
+            if output_hidden_states:
+                all_hidden_states += (motion_hidden_states,)
+
+            past_key_value = (
+                past_key_values[idx + len(self.layers)]
+                if past_key_values is not None
+                else None
+            )
+            layer_outputs = decoder_layer(
+                motion_hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                padding_mask=padding_mask,
+            )
+
+            motion_hidden_states = layer_outputs[0]
+
+            if use_cache:
+                next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
+
+        motion_hidden_states = self.motion_norm(motion_hidden_states)
+
+        # add hidden states from the last decoder layer
+        if output_hidden_states:
+            all_hidden_states += (motion_hidden_states,)
+
+
+        next_cache = next_decoder_cache if use_cache else None
+        if not return_dict:
+            return tuple(
+                v
+                for v in [
+                    hidden_states,
+                    mimo_hidden_states,
+                    motion_hidden_states,
+                    next_cache,
+                    all_hidden_states,
+                    all_hidden_states,
+                    all_self_attns,
+                ]
+                if v is not None
+            )
+        return BaseModelOutputWithPast(
+            last_hidden_state=(hidden_states, mimo_hidden_states, motion_hidden_states),
+            past_key_values=next_cache,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attns,
+        )
+    
+class MoonshotKimiaMotionForCausalLM(Qwen2PreTrainedModel):
+    _tied_weights_keys = ["lm_head.weight", "mimo_output.weight"]
+    config_class = KimiAudioConfig
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.model = MoonshotKimiaModel(config)
+        self.vocab_size = config.vocab_size
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.mimo_output = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.motion_output == nn.Linear(config.hidden_size, config.motion_vocab_size, bias=False)
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
+
+    def set_input_embeddings(self, value):
+        self.model.embed_tokens = value
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head = new_embeddings
+
+    def set_decoder(self, decoder):
+        self.model = decoder
+
+    def get_decoder(self):
+        return self.model
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        text_input_ids: torch.LongTensor = None,
+        whisper_input_feature: Optional[torch.FloatTensor] = None,
+        is_continuous_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        generation_mode: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[Tuple, CausalLMOutputWithPast]:
+
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
+        )
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
+        )
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
+
+        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
+        outputs = self.model(
+            input_ids=input_ids,
+            text_input_ids=text_input_ids,
+            whisper_input_feature=whisper_input_feature,
+            is_continuous_mask=is_continuous_mask,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        if return_dict:
+            hidden_states, mimo_hidden_states, motion_hidden_states = (
+                outputs.last_hidden_state[0],
+                outputs.last_hidden_state[1],
+                outputs.last_hidden_state[2],
+            )
+        else:
+            hidden_states, mimo_hidden_states, motion_hidden_states = outputs[0], outputs[1], outputs[2]
+
+        audio_logits = self.lm_head(hidden_states)
+        text_logits = self.mimo_output(mimo_hidden_states)
+        motion_logits = self.motion_output(motion_hidden_states)
+
+        if not return_dict:
+            output = (text_logits, audio_logits, motion_logits) + outputs[2:]
+            return output
+        return CausalLMOutputWithPast(
+            loss=None,
+            logits=(text_logits, audio_logits, motion_logits),
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
