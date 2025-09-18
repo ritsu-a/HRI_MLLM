@@ -3,7 +3,7 @@ from functools import lru_cache
 import torch
 from typing import Dict, List
 from kimia_infer.utils.special_tokens import instantiate_extra_tokens
-from kimia_infer.utils.data import KimiAContent
+from HRI_mllm.finetune.data import KimiAMotionContent
 import librosa
 
 class LazySupervisedDataset(Dataset):
@@ -26,11 +26,14 @@ class LazySupervisedDataset(Dataset):
         self.kimia_token_offset = kimia_token_offset
         self.raw_data = raw_data_list
 
+
+        ### TODO: segment too long sequence in raw_data
+
         self.cached_data_dict = {}
 
     def __len__(self):
         return len(self.raw_data)
-    
+
     def extract_whisper_feat(self, wav: str):
         wav = librosa.load(wav, sr=16000)[0]
         # if isinstance(wav, str):
@@ -50,13 +53,13 @@ class LazySupervisedDataset(Dataset):
         #     continous_feature.shape[2] * 4,
         # )
         return wav
-    
+
     def _tokenize_text(self, text):
         if text is None:
             return None
         token_ids = self.text_tokenizer.encode(text, bos=False, eos=False)
         return token_ids
-    
+
     def tokenize_message(
         self,
         message,
@@ -66,7 +69,7 @@ class LazySupervisedDataset(Dataset):
         extract_whisper_feature=False,
         output_type: str = "text",
     ):
-        kimia_content_msg = KimiAContent()
+        kimia_content_msg = KimiAMotionContent()
 
         role = message["role"]
 
@@ -76,11 +79,13 @@ class LazySupervisedDataset(Dataset):
             if role == "user":
                 kimia_content_msg.audio_append(self.extra_tokens.kimia_user_msg_start)
                 kimia_content_msg.text_append(self.extra_tokens.kimia_text_blank)
+                kimia_content_msg.motion_append(self.extra_tokens.motion_blank)
             elif role == "assistant":
                 kimia_content_msg.audio_append(
                     self.extra_tokens.kimia_assistant_msg_start
                 )
                 kimia_content_msg.text_append(self.extra_tokens.kimia_text_blank)
+                kimia_content_msg.motion_append(self.extra_tokens.motion_start)
             else:
                 raise NotImplementedError(f"role: {role}")
 
@@ -92,10 +97,14 @@ class LazySupervisedDataset(Dataset):
             kimia_content_msg.audio_extend(
                 [self.extra_tokens.kimia_text_blank] * len(text_tokens)
             )
+            kimia_content_msg.motion_extend(
+                [self.extra_tokens.motion_blank] * len(text_tokens)
+            )
 
             if role == "assistant":
                 kimia_content_msg.text_append(self.extra_tokens.kimia_text_eos, has_loss) # eos for text stream
                 kimia_content_msg.audio_append(self.extra_tokens.kimia_text_blank, audio_token_loss_mask=False)
+                kimia_content_msg.motion_append(self.extra_tokens.motion_blank, motion_token_loss_mask=False)
 
         elif message["message_type"] == "audio":
             speech_tokens = message["audio_tokens"]
@@ -103,6 +112,40 @@ class LazySupervisedDataset(Dataset):
             kimia_content_msg.audio_append(self.extra_tokens.media_begin)
             kimia_content_msg.audio_extend(speech_tokens, is_continuous=True, audio_token_loss_mask=has_loss)
             kimia_content_msg.audio_append(self.extra_tokens.media_end, audio_token_loss_mask=has_loss) # EOS for audio stream
+            kimia_content_msg.text_extend(
+                [self.extra_tokens.kimia_text_blank] * (len(speech_tokens) + 2)
+            )
+            kimia_content_msg.motion_extend(
+                [self.extra_tokens.motion_blank] * (len(speech_tokens) + 2)
+            )
+
+            if has_ct_token:
+                if output_type == "text":
+                    kimia_content_msg.audio_append(self.extra_tokens.kimia_speech_ct_id)
+                else:
+                    kimia_content_msg.audio_append(
+                        self.extra_tokens.kimia_speech_ctd_id
+                    )
+                kimia_content_msg.text_append(self.extra_tokens.kimia_text_blank)
+                kimia_content_msg.motion_append(self.extra_tokens.motion_blank)
+
+
+            if extract_whisper_feature:
+                whisper_feature = self.extract_whisper_feat(message["content"])
+                kimia_content_msg.continuous_feature.append(whisper_feature)
+
+        elif message["message_type"] == "audio_motion":
+            speech_tokens = message["audio_tokens"]
+            motion_tokens = message["motion_tokens"]
+
+            kimia_content_msg.audio_append(self.extra_tokens.media_begin)
+            kimia_content_msg.audio_extend(speech_tokens, is_continuous=False, audio_token_loss_mask=has_loss)
+            kimia_content_msg.audio_append(self.extra_tokens.media_end, audio_token_loss_mask=has_loss) # EOS for audio stream
+
+            kimia_content_msg.motion_append(self.extra_tokens.motion_start)
+            kimia_content_msg.motion_extend(motion_tokens, motion_token_loss_mask=has_loss)
+            kimia_content_msg.motion_append(self.extra_tokens.motion_end, motion_token_loss_mask=has_loss) # EOS for motion stream
+
             kimia_content_msg.text_extend(
                 [self.extra_tokens.kimia_text_blank] * (len(speech_tokens) + 2)
             )
@@ -115,10 +158,11 @@ class LazySupervisedDataset(Dataset):
                         self.extra_tokens.kimia_speech_ctd_id
                     )
                 kimia_content_msg.text_append(self.extra_tokens.kimia_text_blank)
+                kimia_content_msg.motion_append(self.extra_tokens.motion_blank)
 
-            if extract_whisper_feature:
-                whisper_feature = self.extract_whisper_feat(message["content"])
-                kimia_content_msg.continuous_feature.append(whisper_feature)
+            # if extract_whisper_feature:
+            #     whisper_feature = self.extract_whisper_feat(message["content"])
+            #     kimia_content_msg.continuous_feature.append(whisper_feature)
         elif message["message_type"] == None:
             pass
         else:
@@ -127,16 +171,16 @@ class LazySupervisedDataset(Dataset):
         if has_msg_end_token:
             kimia_content_msg.audio_append(self.extra_tokens.msg_end, audio_token_loss_mask=False)
             kimia_content_msg.text_append(self.extra_tokens.kimia_text_blank)
-
+            kimia_content_msg.motion_append(self.extra_tokens.motion_blank)
         assert (
             kimia_content_msg.is_valid()
         ), f"kimia_content_msg is not valid: {kimia_content_msg}"
 
         return kimia_content_msg
-    
+
     def tokenize_conversation(
         self, messages: List[Dict], output_type: str = "text", add_assistant_start_msg: bool = True
-    ) -> KimiAContent:
+    ) -> KimiAMotionContent:
         """
         messages: List[Dict]
         messages[i] = {
@@ -146,7 +190,7 @@ class LazySupervisedDataset(Dataset):
         """
         assert output_type in ["text", "both"]
 
-        msgs: List[KimiAContent] = []
+        msgs: List[KimiAMotionContent] = []
         tokenize_role = True
         has_ct_token = False
         has_msg_end_token = False
@@ -216,34 +260,41 @@ class LazySupervisedDataset(Dataset):
 
         tokenized_conversation = self.tokenize_conversation(conversation, output_type=output_type, add_assistant_start_msg=False)
 
-        audio_input_ids, text_input_ids, is_continuous_mask, audio_token_loss_mask, text_token_loss_mask = tokenized_conversation.to_tensor()
+        audio_input_ids, motion_input_ids, text_input_ids, is_continuous_mask, audio_token_loss_mask, motion_token_loss_mask, text_token_loss_mask = tokenized_conversation.to_tensor()
 
         audio_features = tokenized_conversation.continuous_feature
 
         audio_labels = torch.cat((audio_input_ids[:, 1:], audio_input_ids.new_full((1, 1), self.pad_token)), dim=1)
+        motion_labels = torch.cat((motion_input_ids[:, 1:], motion_input_ids.new_full((1, 1), self.extra_tokens.motion_blank)), dim=1)
         text_labels = torch.cat((text_input_ids[:, 1:], text_input_ids.new_full((1, 1), self.pad_token)), dim=1)
         audio_loss_mask = torch.cat((audio_token_loss_mask[:, 1:], audio_token_loss_mask.new_full((1, 1), False)), dim=1)
+        motion_loss_mask = torch.cat((motion_token_loss_mask[:, 1:], motion_token_loss_mask.new_full((1, 1), False)), dim=1)
         text_loss_mask = torch.cat((text_token_loss_mask[:, 1:], text_token_loss_mask.new_full((1, 1), False)), dim=1)
 
         ret = dict(
             input_ids=audio_input_ids,
+            motion_input_ids=motion_input_ids,
             text_input_ids=text_input_ids,
             whisper_input_feature=audio_features,
             is_continuous_mask=is_continuous_mask,
             labels=(
                 audio_labels,
+                motion_labels,
                 text_labels,
                 audio_loss_mask,
+                motion_loss_mask,
                 text_loss_mask,
             ),
         )
 
+        print(audio_labels.shape)
+
         return ret
-    
+
     @staticmethod
     def collate_fn(batch):
         assert len(batch) == 1, "micro batch size is 1 for demo"
 
         return batch[0]
-        
-        
+
+

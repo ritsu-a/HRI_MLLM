@@ -47,6 +47,63 @@ Inference with gpt2 motion adaptor:
     CUDA_VISIBLE_DEVICES=0,1 python HRI_mllm/scripts/test_qwen2_5omni_motion_full.py 
 
 
+After change llm model, create a randomized base model based on kimi-audio-7b-instruct:
+    python HRI_mllm/model/kimi_motion/create_base_model.py
+
+Create finetune dataset:
+    python HRI_mllm/datasets/BEAT_preprocess/create_jsonl.py
+
+CUDA_VISIBLE_DEVICES=0 python /root/pengyang/codebase/HRI_MLLM/HRI_mllm/train/finetune_kimi_motion.py \
+    --model_name_or_path "output/motion_model/Kimi-Audio-Motion-7B" \
+    --model_path "output/motion_model/Kimi-Audio-Motion-7B" \
+    --data_path "/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi/beat_v1_full.jsonl" \
+    --eval_ratio 0.05 \
+    --bf16 True \
+    --output_dir output/kimiaudio_ckpts \
+    --num_train_epochs 5 \
+    --per_device_train_batch_size 1 \
+    --per_device_eval_batch_size 1 \
+    --gradient_accumulation_steps 1 \
+    --eval_strategy "no" \
+    --save_strategy "steps" \
+    --save_steps 1000 \
+    --save_total_limit 10 \
+    --learning_rate 1e-5 \
+    --weight_decay 0.1 \
+    --adam_beta2 0.95 \
+    --warmup_ratio 0.01 \
+    --lr_scheduler_type "cosine" \
+    --logging_steps 1 \
+    --report_to "none" \
+    --model_max_length 512 \
+    --gradient_checkpointing True \
+    --lazy_preprocess True \
+    --deepspeed /root/pengyang/codebase/HRI_MLLM/HRI_mllm/finetune/ds_config_zero3.json
+
+
+3. Finetune the model.
+
+    You can use the following command to finetune the model.
+
+    ```bash
+    bash HRI_mllm/finetune/finetune_ds.sh \
+        --model_path "output/motion_model/Kimi-Audio-Motion-7B" \
+        --data "/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi/beat_v1_full.jsonl"
+    ```
+
+4. Convert the finetuned model for inference.
+    ```bash
+    CUDA_VISIBLE_DEVICES=0 python -m finetune_codes.model --model_name "moonshotai/Kimi-Audio-7B" \
+    --action "export_model" \
+    --input_dir "output/kimiaudio_ckpts" \
+    --output_dir "output/finetuned_hf_for_inference"
+    ```
+
+You can infer with the finetuned model by running:
+    ```bash
+    CUDA_VISIBLE_DEVICES=0 python -m finetune_codes.check_sft_infer
+    ```
+
 Server:
     python HRI_mllm/inference/text_response_server.py
 

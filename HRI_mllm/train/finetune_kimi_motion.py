@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from typing import Dict, Optional
+import wandb
 
 import torch
 from deepspeed import zero
@@ -17,18 +18,22 @@ from transformers.trainer_pt_utils import LabelSmoother
 from accelerate.utils import DistributedType
 from huggingface_hub import snapshot_download
 
-from finetune_codes.model import KimiAudioModel
-from finetune_codes.datasets import LazySupervisedDataset
+from HRI_mllm.finetune.motion_model import KimiAudioMotionModel
+from HRI_mllm.finetune.datasets import LazySupervisedDataset
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
+os.environ["WANDB_PROJECT"] = "Kimi-Audio-Motion-7B-finetune"  # 设置WandB项目名称
+os.environ["WANDB_LOG_MODEL"] = "false"  # 如果你想将模型检查点保存为WandB工件（artifact）
+os.environ["WANDB_WATCH"] = "false"     # 通常"false"日志记录更快，如需梯度等可设为"all"
+
 
 @dataclass
 class ModelArguments:
-    model_name_or_path: Optional[str] = field(default="moonshotai/Kimi-Audio-7B")
+    model_name_or_path: Optional[str] = field(default="output/motion_model/Kimi-Audio-Motion-7B")
     model_path: str = field(
         default=None, metadata={"help": "Path to the pretrained model."}
     )
@@ -55,6 +60,7 @@ class TrainingArguments(transformers.TrainingArguments):
             "help": "Maximum sequence length. Sequences will be right padded (and possibly truncated)."
         },
     )
+    report_to: str = field(default="wandb")   # 添加这一行
 
 
 
@@ -118,21 +124,7 @@ def make_supervised_data_module(
     return dict(train_dataset=train_dataset, eval_dataset=eval_dataset)
 
 
-def compute_loss(outputs, labels, num_items_in_batch=None):
 
-    audio_logits, text_logits = outputs.logits
-
-    audio_labels, text_labels, audio_loss_mask, text_loss_mask = labels
-    assert audio_labels.shape[0] == 1, print("we only support micro batch size 1 for demo purpose")
-
-    audio_loss = torch.nn.functional.cross_entropy(audio_logits.view(-1, audio_logits.shape[-1]), audio_labels.view(-1), reduction="none")
-    text_loss = torch.nn.functional.cross_entropy(text_logits.view(-1, text_logits.shape[-1]), text_labels.view(-1), reduction="none")
-
-
-    audio_loss = (audio_loss * audio_loss_mask.view(-1)).sum() / (audio_loss_mask.view(-1).sum() + 1e-4)
-    text_loss = (text_loss * text_loss_mask.view(-1)).sum() / (text_loss_mask.view(-1).sum() + 1e-4)
-    loss = audio_loss + text_loss
-    return loss
 
 
 def train():
@@ -146,6 +138,8 @@ def train():
         data_args,
         training_args,
     ) = parser.parse_args_into_dataclasses()
+
+
 
     # This serves for single-gpu qlora.
     if getattr(training_args, 'deepspeed', None) and int(os.environ.get("WORLD_SIZE", 1))==1:
@@ -170,9 +164,21 @@ def train():
     # check if model_path exists
     if not os.path.exists(model_args.model_path):
         raise ValueError(f"Model path {model_args.model_path} does not exist")
-    model = KimiAudioModel.from_pretrained(model_args.model_path, 
+    model = KimiAudioMotionModel.from_pretrained(model_args.model_path, 
                                            device_map=None,
                                            **model_load_kwargs)
+
+    for param in model.parameters():
+        param.requires_grad = False
+
+    for param in model.model.mimo_layers.parameters():
+        param.requires_grad = True
+    for param in model.model.motion_layers.parameters():
+        param.requires_grad = True
+    for param in model.mimo_output.parameters():
+        param.requires_grad = True
+    for param in model.motion_output.parameters():
+        param.requires_grad = True
 
     text_tokenizer = AutoTokenizer.from_pretrained(
         cache_path, trust_remote_code=True
@@ -183,6 +189,26 @@ def train():
         whisper_model=model.whisper_model, text_tokenizer=text_tokenizer,
         data_args=data_args, max_len=training_args.model_max_length, kimia_token_offset=model.config.kimia_token_offset
     )
+
+    def compute_loss(outputs, labels, num_items_in_batch=None):
+
+        audio_logits, motion_logits, text_logits = outputs.logits
+
+        audio_labels, motion_labels, text_labels, audio_loss_mask, motion_loss_mask, text_loss_mask = labels
+        assert audio_labels.shape[0] == 1, print("we only support micro batch size 1 for demo purpose")
+
+        audio_loss = torch.nn.functional.cross_entropy(audio_logits.view(-1, audio_logits.shape[-1]), audio_labels.view(-1), reduction="none")
+        motion_loss = torch.nn.functional.cross_entropy(motion_logits.view(-1, motion_logits.shape[-1]), motion_labels.view(-1), reduction="none")
+        text_loss = torch.nn.functional.cross_entropy(text_logits.view(-1, text_logits.shape[-1]), text_labels.view(-1), reduction="none")
+
+
+        audio_loss = (audio_loss * audio_loss_mask.view(-1)).sum() / (audio_loss_mask.view(-1).sum() + 1e-4)
+        motion_loss = (motion_loss * motion_loss_mask.view(-1)).sum() / (motion_loss_mask.view(-1).sum() + 1e-4)
+        text_loss = (text_loss * text_loss_mask.view(-1)).sum() / (text_loss_mask.view(-1).sum() + 1e-4)
+        loss = audio_loss + 10 * motion_loss
+
+        
+        return loss
 
     # Start trainner
     trainer = Trainer(

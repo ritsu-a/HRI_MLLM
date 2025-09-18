@@ -23,7 +23,7 @@ MASTER_ADDR=${MASTER_ADDR:-localhost}
 # The port for communication
 MASTER_PORT=${MASTER_PORT:-6001}
 
-MODEL="moonshotai/Kimi-Audio-7B" # Set the path if you do not want to load from huggingface directly
+MODEL="output/motion_model/Kimi-Audio-Motion-7B" # Set the path if you do not want to load from huggingface directly
 
 PRETRAINED_MODEL_PATH=""
 
@@ -85,7 +85,7 @@ DISTRIBUTED_ARGS="
 echo "start finetune"
 echo "DISTRIBUTED_ARGS: $DISTRIBUTED_ARGS"
 
-torchrun $DISTRIBUTED_ARGS finetune.py \
+torchrun $DISTRIBUTED_ARGS /root/pengyang/codebase/HRI_MLLM/HRI_mllm/train/finetune_kimi_motion.py \
     --model_name_or_path $MODEL \
     --model_path $PRETRAINED_MODEL_PATH \
     --data_path $DATA \
@@ -110,4 +110,4 @@ torchrun $DISTRIBUTED_ARGS finetune.py \
     --model_max_length 512 \
     --gradient_checkpointing True \
     --lazy_preprocess True \
-    --deepspeed finetune_codes/ds_config_zero3.json
+    --deepspeed /root/pengyang/codebase/HRI_MLLM/HRI_mllm/finetune/ds_config_zero3.json

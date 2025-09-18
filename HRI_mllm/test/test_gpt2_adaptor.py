@@ -62,14 +62,30 @@ def audioToken2motionPkl(audio_codes, motion_tokens_gt):
     }
     config = SimpleNamespace(**config)
 
-    def generate_for_long_audio(audio_tokens, motion_tokens_gt, model, device, max_length=4096):
+    def generate_for_long_audio(audio_tokens, motion_tokens_gt, model, device, max_length=4096, 
+                           top_k=50, temperature=0.8, repetition_penalty=1.2):
+        """
+        生成长音频对应的运动token，使用多样性增强技术
+        
+        Args:
+            audio_tokens: 音频token序列
+            motion_tokens_gt: 真实运动token序列（用于teacher forcing）
+            model: 生成模型
+            device: 设备
+            max_length: 最大生成长度
+            top_k: top-k采样参数
+            temperature: 温度参数，控制随机性
+            repetition_penalty: 重复惩罚参数，>1时惩罚重复token
+        """
         model.eval()
         generated = []
         current_seq = []
         motion_count = 0
         max_context = max_length - 50  # 保留空间生成新token
-        interleave_audios, interleave_motions = config.interleave_ratio
         token_labels = []
+        
+        # 用于重复惩罚的token历史记录
+        generated_history = []
         
         with torch.no_grad():
             for i, token in enumerate(audio_tokens):
@@ -84,20 +100,43 @@ def audioToken2motionPkl(audio_codes, motion_tokens_gt):
                 output = model(inputs, attention_mask=attn_mask, labels=labels)
                 next_token_logits = output.logits[0, -1, :]
                 
-                # 限制在motion词表范围内
-                motion_logits = next_token_logits
-                next_token = torch.argmax(motion_logits).item()
+                # 应用重复惩罚
+                if repetition_penalty != 1.0 and generated_history:
+                    for token_id in set(generated_history):
+                        next_token_logits[token_id] = next_token_logits[token_id] / repetition_penalty
+                
+                # 应用temperature
+                next_token_logits = next_token_logits / temperature
+                
+                # top-k采样
+                if top_k > 0:
+                    top_k_values, top_k_indices = torch.topk(next_token_logits, top_k)
+                    # 创建mask，将非top-k的logits设为负无穷
+                    mask = torch.ones_like(next_token_logits) * float('-inf')
+                    mask[top_k_indices] = next_token_logits[top_k_indices]
+                    next_token_logits = mask
+                
+                # 使用softmax和多项式采样
+                probs = torch.softmax(next_token_logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1).item()
                 
                 generated.append(next_token)
-                current_seq.append(motion_tokens_gt[i])  # 添加到上下文
-                token_labels.append(motion_tokens_gt[i])  # motion token对应的label为自身
+                generated_history.append(next_token)  # 记录生成历史
+                
+                # 保持历史记录长度，避免内存占用过大
+                if len(generated_history) > 100:
+                    generated_history = generated_history[-100:]
+                
+                # free-running
+                current_seq.append(next_token)  
+                token_labels.append(next_token)  # motion token对应的label为自身
                 motion_count += 1
 
                 if len(current_seq) >= max_length:
                     break
                 if motion_count >= len(motion_tokens_gt):
                     break   
-        
+    
         # 提取生成的motion tokens
         motion_tokens = [t for t in generated]
         return motion_tokens
@@ -133,7 +172,7 @@ train_data_feature = np.load(f"/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kim
 audio_path = f"/root/pengyang/codebase/HRI_MLLM/data/beat_english_v0.2.1/{filename.split('_')[0]}/{filename}.wav"
 
 
-audio_tokens = torch.load(audio_token_path).squeeze(0) - 152064
+audio_tokens = torch.load(audio_token_path).squeeze(0)
 
 
 ## Use a local HuggingFace model to inference.

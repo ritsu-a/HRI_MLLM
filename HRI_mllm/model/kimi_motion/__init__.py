@@ -1,1 +1,1 @@
-from .model import MoonshotKimiaForCausalLM, MoonshotKimiaMotionModel
+from .model import MoonshotKimiaForCausalLM, MoonshotKimiaMotionModel, MoonshotKimiaMotionForCausalLM

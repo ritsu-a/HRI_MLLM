@@ -1002,6 +1002,7 @@ class MoonshotKimiaMotionModel(Qwen2PreTrainedModel):
     def forward(
         self,
         input_ids: torch.LongTensor = None,
+        motion_input_ids: torch.LongTensor = None,
         text_input_ids: torch.LongTensor = None,
         whisper_input_feature: Optional[torch.FloatTensor] = None,
         is_continuous_mask: Optional[torch.Tensor] = None,
@@ -1248,11 +1249,11 @@ class MoonshotKimiaMotionForCausalLM(Qwen2PreTrainedModel):
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = MoonshotKimiaModel(config)
+        self.model = MoonshotKimiaMotionModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.mimo_output = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        self.motion_output == nn.Linear(config.hidden_size, config.motion_vocab_size, bias=False)
+        self.motion_output = nn.Linear(config.hidden_size, config.motion_vocab_size, bias=False)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1278,6 +1279,7 @@ class MoonshotKimiaMotionForCausalLM(Qwen2PreTrainedModel):
     def forward(
         self,
         input_ids: torch.LongTensor = None,
+        motion_input_ids: torch.LongTensor = None,
         text_input_ids: torch.LongTensor = None,
         whisper_input_feature: Optional[torch.FloatTensor] = None,
         is_continuous_mask: Optional[torch.Tensor] = None,
@@ -1292,7 +1294,6 @@ class MoonshotKimiaMotionForCausalLM(Qwen2PreTrainedModel):
         generation_mode: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-
         output_attentions = (
             output_attentions
             if output_attentions is not None
@@ -1310,6 +1311,7 @@ class MoonshotKimiaMotionForCausalLM(Qwen2PreTrainedModel):
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
             input_ids=input_ids,
+            motion_input_ids=motion_input_ids,
             text_input_ids=text_input_ids,
             whisper_input_feature=whisper_input_feature,
             is_continuous_mask=is_continuous_mask,
