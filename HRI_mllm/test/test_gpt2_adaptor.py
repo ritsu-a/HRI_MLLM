@@ -63,7 +63,7 @@ def audioToken2motionPkl(audio_codes, motion_tokens_gt):
     config = SimpleNamespace(**config)
 
     def generate_for_long_audio(audio_tokens, motion_tokens_gt, model, device, max_length=4096, 
-                           top_k=50, temperature=0.8, repetition_penalty=1.2):
+                           top_k=50, temperature=0.8, repetition_penalty=1.8):
         """
         生成长音频对应的运动token，使用多样性增强技术
         
@@ -166,7 +166,7 @@ motion_vae.to(device="cuda")
 
 
 
-filename = "3_solomon_0_1_1"
+filename = "2_scott_0_3_3"
 audio_token_path =  f"/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi/data/{filename}_audio_tokens.pt"
 train_data_feature = np.load(f"/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi/new_joint_vecs/{filename}.npy")
 audio_path = f"/root/pengyang/codebase/HRI_MLLM/data/beat_english_v0.2.1/{filename.split('_')[0]}/{filename}.wav"

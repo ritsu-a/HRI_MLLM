@@ -1,5 +1,3 @@
-# server.py
-from flask import Flask, request, send_file, jsonify
 ### streaming demo for qwen2_5omni_motion
 ### HRI_mllm/model/qwen2_5omni_motion/monkey_patch_generate.py for monkey patching the generate function to support token-level streaming
 
@@ -9,13 +7,15 @@ from HRI_mllm.model.qwen2_5omni_motion.monkey_patch_generate import monkey_patch
 from HRI_mllm.model.qwen2_5omni.streamers import QwenMotionAdaptorStreamer
 from HRI_mllm import ROOT
 
-from HRI_mllm.utils.motion_utils.g1ml3d import vec_to_data_pkl, feats2datapkl
+from HRI_mllm.utils.motion_utils.g1ml3d import vec_to_data_pkl, feats2datapkl, normalize_vec
 from HRI_mllm.model.motion_encoder.vqvae import VQVae, VQVAE_Trans
 
-from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.io.motion_pkl_to_csv import load_motion_pkl_as_csv_data
-from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.motion_lib.qpose_denoiser import low_pass_filter
-
 from kimia_infer.api.kimia import KimiAudio
+
+
+from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.io.motion_pkl_to_csv import load_motion_pkl_as_csv_data
+
+import numpy as np
 
 
 import yaml
@@ -23,21 +23,12 @@ import os
 import sys
 import pickle
 
+from HRI_mllm.model.gpt2_adaptor.model import MixedInputGPT2
+
 from transformers import GPT2Config, GPT2LMHeadModel
 from types import SimpleNamespace
 import soundfile as sf
 
-
-from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.io.motion_pkl_to_csv import load_motion_pkl_as_csv_data
-
-
-import torch
-import zipfile
-from io import BytesIO
-import shutil
-
-import numpy as np
-from HRI_mllm.model.gpt2_adaptor.model import MixedInputGPT2
 
 import os
 import sys
@@ -50,6 +41,8 @@ from pydub import AudioSegment
 import torch
 torch.cuda.set_device(0)
 
+
+question = "What do you usually do on weekends?"
 
 
 def tts(text, save_path):
@@ -73,6 +66,8 @@ def tts(text, save_path):
         print("⚠️ 生成音频失败: audio_bytes 为空")
 
 
+
+
 ### loading kimi
 kimi_model = KimiAudio(
     model_path="moonshotai/Kimi-Audio-7B-Instruct",
@@ -89,11 +84,20 @@ sampling_params = {
     "text_repetition_penalty": 1.0,
     "text_repetition_window_size": 16,
 }
-def audioToken2motionPkl(audio_codes):
+
+
+
+
+
+
+
+
+
+def audioToken2motionPkl(audio_codes, motion_tokens_gt):
     """
     Convert audio codes to motion codes.
     """
-    config={
+    config = {
         "beat_tts_root": "/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi",
         "audio_vocab_size": 16384,
         "motion_vocab_size": 512,
@@ -186,24 +190,22 @@ def audioToken2motionPkl(audio_codes):
         motion_tokens = [t for t in generated]
         return motion_tokens
     
-    motion_tokens = generate_for_long_audio(audio_codes.squeeze(0), None,  motion_adaptor, device=motion_adaptor.device)
+    motion_tokens = generate_for_long_audio(audio_codes.squeeze(0), None, motion_adaptor, device=motion_adaptor.device)
 
 
     decoded = motion_vae.decode(torch.tensor(motion_tokens).unsqueeze(0).to("cuda"))
     data_dict_decoded = feats2datapkl(decoded.detach().cpu())
 
-    return data_dict_decoded
+    return data_dict_decoded, motion_tokens
 
 
-
-### loading motion adaptor
 motion_adaptor = MixedInputGPT2.from_pretrained("output/motion_adaptor_v1/kimi_audio_motion_gpt2_hidden_30_100", device_map="auto")
 
-### loading motion vae 
+### loading motion VQVAE
 def open_yaml(path):
     with open(path, 'r', encoding="utf-8") as file:
         data = yaml.safe_load(file)
-    return data    
+    return data        
 motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "g1_vqvae_body.yaml"))
 motion_vae = VQVae(**motion_config)
 state_dict = torch.load(motion_config["ckpt"], map_location="cpu", weights_only=False)
@@ -213,79 +215,42 @@ motion_vae.to(device="cuda")
 
 
 
-app = Flask(__name__)
+### generate text response
+tts_save_path = "/root/pengyang/codebase/HRI_MLLM/tts_output.wav"
+tts(question, tts_save_path)
+# audio2audio
+messages = [
+    {
+        "role": "user",
+        "message_type": "audio",
+        "content": tts_save_path,
+    }
+]
 
-@app.route('/generate-files', methods=['POST'])
-def generate_files():
-    try:
-        data = request.get_json()
-        text = data.get('text')
-        
-        if not text:
-            return jsonify({"error": "No text provided"}), 400
-        
-        # 调用推理函数生成WAV和CSV文件
-        # 假设 inference 函数同时生成WAV和CSV
-        with torch.no_grad():
 
-            tts_save_path = "output/test_audios/tts_output.wav"
-            tts(text, tts_save_path)
+wav, audio_tokens, text = kimi_model.generate(messages, **sampling_params, output_type="both")
 
-            messages = [
-                {
-                    "role": "user",
-                    "message_type": "audio",
-                    "content": tts_save_path,
-                }
-            ]
-
-            wav, audio_tokens, text = kimi_model.generate(messages, **sampling_params, output_type="both")
-
-            motion_pkl = audioToken2motionPkl(audio_tokens)
+## Use a local HuggingFace model to inference.
 
 
 
-            with open("output.pkl", 'wb') as f:
-                pickle.dump(motion_pkl, f)
 
-            motion_csv =  load_motion_pkl_as_csv_data("output.pkl")
-            motion_csv = low_pass_filter(motion_csv, cutoff_freq=0.2, order=4)
-            np.savetxt("output.csv", motion_csv, delimiter=',', fmt='%.8f')
+# motion_tokens = motion_vae.encode(normalize_vec(torch.from_numpy(train_data_feature).unsqueeze(0).to("cuda:0")))[0].detach().cpu()
+
+motion_pkl, llm_motion_tokens = audioToken2motionPkl(audio_tokens, None)
 
 
-            sf.write("output.wav", wav.detach().cpu().view(-1).numpy(), 24000)
-        # response, audio, audio_code = inference(text=text)
-        print(f"Received text: {text}")
-        
-        # 确保文件存在
-        wav_path = "output.wav"
-        csv_path = "output.csv"
-        
-        if not (os.path.exists(wav_path) and os.path.exists(csv_path)):
-            return jsonify({"error": "Files not generated"}), 500
-        
-        # 创建内存中的ZIP文件
-        memory_zip = BytesIO()
-        
-        with zipfile.ZipFile(memory_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            zipf.write(wav_path, os.path.basename(wav_path))
-            zipf.write(csv_path, os.path.basename(csv_path))
-        
-        memory_zip.seek(0)
-        print("Files generated successfully")
-        
-        # 发送ZIP文件
-        return send_file(
-            memory_zip,
-            mimetype='application/zip',
-            as_attachment=True,
-            download_name='generated_files.zip'
-        )
+
+
+with open("llm.pkl", 'wb') as f:
+    pickle.dump(motion_pkl, f)
     
-    except Exception as e:
-        print(e)
-        return jsonify({"error": str(e)}), 500
+motion_csv =  load_motion_pkl_as_csv_data("llm.pkl")
+
+np.savetxt("llm.csv", motion_csv, delimiter=',', fmt='%.8f')
+
+sf.write("audio.wav", wav.detach().cpu().view(-1).numpy(), 24000)
 
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+
+    
