@@ -14,8 +14,8 @@ import os
 from .quaternion import *
 from .paramUtil import *
 
-hparams_mean = np.load(os.path.join("{DATA_ROOT}/BEAT_v1_kimi", "Mean.npy"))
-hparams_std = np.load(os.path.join("{DATA_ROOT}/BEAT_v1_kimi", "Std.npy"))
+hparams_mean = np.load(os.path.join(f"{DATA_ROOT}/BEAT_v1_kimi", "Mean.npy"))
+hparams_std = np.load(os.path.join(f"{DATA_ROOT}/BEAT_v1_kimi", "Std.npy"))
 
 def normalize_vec(vec):
     """

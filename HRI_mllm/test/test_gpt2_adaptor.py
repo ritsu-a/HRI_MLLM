@@ -15,6 +15,8 @@ from kimia_infer.api.kimia import KimiAudio
 
 from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.io.motion_pkl_to_csv import load_motion_pkl_as_csv_data
 
+from HRI_mllm.external.GMR.scripts.vis_csv_motion import vis_audio_motion
+
 import numpy as np
 
 
@@ -169,7 +171,7 @@ motion_vae.to(device="cuda")
 filename = "2_scott_0_3_3"
 audio_token_path =  f"{DATA_ROOT}/BEAT_v1_kimi/data/{filename}_audio_tokens.pt"
 train_data_feature = np.load(f"{DATA_ROOT}/BEAT_v1_kimi/new_joint_vecs/{filename}.npy")
-audio_path = f"{DATA_ROOT}/{filename.split('_')[0]}/{filename}.wav"
+audio_path = f"{DATA_ROOT}/beat_english_v0.2.1/{filename.split('_')[0]}/{filename}.wav"
 
 
 audio_tokens = torch.load(audio_token_path).squeeze(0)
@@ -212,5 +214,5 @@ import shutil
 shutil.copyfile(audio_path, "audio.wav")
 
 
-
+vis_audio_motion("audio.wav", "llm.csv", output_path="final_output_1.mp4", robot_type="unitree_g1", rate_limit=False)
     

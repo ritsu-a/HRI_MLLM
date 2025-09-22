@@ -7,3 +7,6 @@
 [submodule "HRI_mllm/external/HRI_retarget"]
 	path = HRI_mllm/external/HRI_retarget
 	url = git@github.com:ritsu-a/HRI_retarget.git
+[submodule "HRI_mllm/external/GMR"]
+	path = HRI_mllm/external/GMR
+	url = git@github.com:ritsu-a/GMR.git

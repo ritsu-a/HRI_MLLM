@@ -18,7 +18,7 @@ class MixedInputGPT2(GPT2LMHeadModel):
         # 存储tokenizer用于处理token输入
         self.motion_tokenizer = nn.Embedding(config.vocab_size, config.hidden_size)
 
-        saved_weight = torch.load("{OUTPUT_ROOT}/motion_adaptor_v1/embed_tokens_weight.pt")
+        saved_weight = torch.load(f"{OUTPUT_ROOT}/motion_adaptor_v1/embed_tokens_weight.pt")
         self.audio_tokenizer = torch.nn.Embedding.from_pretrained(
             saved_weight,
             padding_idx=152063,

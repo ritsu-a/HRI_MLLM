@@ -7,7 +7,13 @@ Install:
 
     cd HRI_mllm/external/HRI_retarget
     git checkout g1_hri_mllm(maybe not need this line?)
+
+
     pip install -e .
+
+    you may need to install egl:
+    sudo apt-get install libegl1-mesa-dev
+
 
 Compute joint_vec:
     python HRI_mllm/external/HRI_retarget/HRI_retarget/scripts/g1ml3d_motion_representation.py 
