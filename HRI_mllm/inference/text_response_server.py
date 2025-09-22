@@ -29,7 +29,7 @@ import soundfile as sf
 
 
 from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.io.motion_pkl_to_csv import load_motion_pkl_as_csv_data
-
+from HRI_mllm import DATA_ROOT
 
 import torch
 import zipfile
@@ -94,7 +94,7 @@ def audioToken2motionPkl(audio_codes):
     Convert audio codes to motion codes.
     """
     config={
-        "beat_tts_root": "/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi",
+        "beat_tts_root": "{DATA_ROOT}/BEAT_v1_kimi",
         "audio_vocab_size": 16384,
         "motion_vocab_size": 512,
         "total_vocab_size": 16384 + 512,
@@ -288,4 +288,4 @@ def generate_files():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5005)

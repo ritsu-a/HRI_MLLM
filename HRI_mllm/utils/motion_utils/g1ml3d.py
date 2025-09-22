@@ -6,6 +6,7 @@ from HRI_retarget.utils.torch_utils.diff_quat import quat_to_matrix
 from HRI_retarget.model.g1_29 import G1_29_Motion_Model
 import numpy as np
 import os
+from HRI_mllm import DATA_ROOT
 
 from .skeleton import Skeleton
 import numpy as np
@@ -13,8 +14,8 @@ import os
 from .quaternion import *
 from .paramUtil import *
 
-hparams_mean = np.load(os.path.join("/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi", "Mean.npy"))
-hparams_std = np.load(os.path.join("/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi", "Std.npy"))
+hparams_mean = np.load(os.path.join("{DATA_ROOT}/BEAT_v1_kimi", "Mean.npy"))
+hparams_std = np.load(os.path.join("{DATA_ROOT}/BEAT_v1_kimi", "Std.npy"))
 
 def normalize_vec(vec):
     """

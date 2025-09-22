@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 from transformers import GPT2LMHeadModel, GPT2Config, GPT2Tokenizer
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
+from HRI_mllm import OUTPUT_ROOT
 
 class MixedInputGPT2(GPT2LMHeadModel):
     def __init__(self, config, audio_hidden_size=3584):
@@ -17,7 +18,7 @@ class MixedInputGPT2(GPT2LMHeadModel):
         # 存储tokenizer用于处理token输入
         self.motion_tokenizer = nn.Embedding(config.vocab_size, config.hidden_size)
 
-        saved_weight = torch.load("/root/pengyang/codebase/HRI_MLLM/output/motion_adaptor_v1/embed_tokens_weight.pt")
+        saved_weight = torch.load("{OUTPUT_ROOT}/motion_adaptor_v1/embed_tokens_weight.pt")
         self.audio_tokenizer = torch.nn.Embedding.from_pretrained(
             saved_weight,
             padding_idx=152063,

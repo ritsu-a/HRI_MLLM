@@ -8,14 +8,15 @@ import soundfile as sf
 import torch
 import yaml
 import json
+from HRI_mllm import ROOT, DATA_ROOT, OUTPUT_ROOT
 
 
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--audio_path", type=str, default="/root/pengyang/codebase/HRI_MLLM/data/beat_english_v0.2.1/all.txt")
-    parser.add_argument("--motion_root", type=str, default="/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1")
-    parser.add_argument("--data_path", type=str, default="/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi")
+    parser.add_argument("--audio_path", type=str, default="{DATA_ROOT}/beat_english_v0.2.1/all.txt")
+    parser.add_argument("--motion_root", type=str, default="{DATA_ROOT}/BEAT_v1")
+    parser.add_argument("--data_path", type=str, default="{DATA_ROOT}/BEAT_v1_kimi")
     parser.add_argument("--model_name_or_path", type=str, default="moonshotai/Kimi-Audio-7B")
 
 
@@ -36,7 +37,7 @@ if __name__ == "__main__":
     for line in tqdm(lines):
         audio_path = line.strip()
 
-        wav_path = os.path.join("/root/pengyang/codebase/HRI_MLLM/data/beat_english_v0.2.1", audio_path.split('/')[-1].split('_')[0], audio_path.split('/')[-1].replace('_audio_tokens.pt', '.wav'))
+        wav_path = os.path.join("{DATA_ROOT}/beat_english_v0.2.1", audio_path.split('/')[-1].split('_')[0], audio_path.split('/')[-1].replace('_audio_tokens.pt', '.wav'))
         motion_path = line.strip().replace("audio_tokens", "motion_tokens")
 
         audio_tokens = torch.load(audio_path).numpy().reshape(-1).tolist()

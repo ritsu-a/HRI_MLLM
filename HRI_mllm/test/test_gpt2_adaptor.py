@@ -5,7 +5,7 @@ from HRI_mllm.model.qwen2_5omni import Qwen2_5OmniForConditionalGeneration, Qwen
 from HRI_mllm.utils.qwen_omni_utils import process_mm_info, process_audio_info
 from HRI_mllm.model.qwen2_5omni_motion.monkey_patch_generate import monkey_patch_qwen2_5omni_for_motion_tts
 from HRI_mllm.model.qwen2_5omni.streamers import QwenMotionAdaptorStreamer
-from HRI_mllm import ROOT
+from HRI_mllm import ROOT, DATA_ROOT, OUTPUT_ROOT
 
 from HRI_mllm.utils.motion_utils.g1ml3d import vec_to_data_pkl, feats2datapkl, normalize_vec
 from HRI_mllm.model.motion_encoder.vqvae import VQVae, VQVAE_Trans
@@ -167,9 +167,9 @@ motion_vae.to(device="cuda")
 
 
 filename = "2_scott_0_3_3"
-audio_token_path =  f"/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi/data/{filename}_audio_tokens.pt"
-train_data_feature = np.load(f"/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi/new_joint_vecs/{filename}.npy")
-audio_path = f"/root/pengyang/codebase/HRI_MLLM/data/beat_english_v0.2.1/{filename.split('_')[0]}/{filename}.wav"
+audio_token_path =  f"{DATA_ROOT}/BEAT_v1_kimi/data/{filename}_audio_tokens.pt"
+train_data_feature = np.load(f"{DATA_ROOT}/BEAT_v1_kimi/new_joint_vecs/{filename}.npy")
+audio_path = f"{DATA_ROOT}/{filename.split('_')[0]}/{filename}.wav"
 
 
 audio_tokens = torch.load(audio_token_path).squeeze(0)

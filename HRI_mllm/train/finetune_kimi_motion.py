@@ -192,10 +192,11 @@ def train():
 
     def compute_loss(outputs, labels, num_items_in_batch=None):
 
-        audio_logits, motion_logits, text_logits = outputs.logits
+        text_logits, audio_logits, motion_logits = outputs.logits
 
         audio_labels, motion_labels, text_labels, audio_loss_mask, motion_loss_mask, text_loss_mask = labels
         assert audio_labels.shape[0] == 1, print("we only support micro batch size 1 for demo purpose")
+        
 
         audio_loss = torch.nn.functional.cross_entropy(audio_logits.view(-1, audio_logits.shape[-1]), audio_labels.view(-1), reduction="none")
         motion_loss = torch.nn.functional.cross_entropy(motion_logits.view(-1, motion_logits.shape[-1]), motion_labels.view(-1), reduction="none")
@@ -206,6 +207,8 @@ def train():
         motion_loss = (motion_loss * motion_loss_mask.view(-1)).sum() / (motion_loss_mask.view(-1).sum() + 1e-4)
         text_loss = (text_loss * text_loss_mask.view(-1)).sum() / (text_loss_mask.view(-1).sum() + 1e-4)
         loss = audio_loss + 10 * motion_loss
+
+        
 
         
         return loss

@@ -13,7 +13,7 @@ from HRI_mllm.model.kimi_motion import MoonshotKimiaMotionForCausalLM
 class KimiAudioMotionModel(MoonshotKimiaMotionForCausalLM):
     def __init__(self, config):
         super().__init__(config)
-        self.whisper_model = WhisperEncoder("/data0/.cache/huggingface/hub/models--moonshotai--Kimi-Audio-7B/snapshots/d90be7113cd5be6bcf54fae2aabcad060a23f6cf/whisper-large-v3", mel_batch_size=20, unfreeze_online_whisper_model=True)
+        self.whisper_model = WhisperEncoder("/DATA/disk1/whisper_large_v3", mel_batch_size=20, unfreeze_online_whisper_model=True)
 
     @classmethod
     def init_from_pretrained(cls, model_name_or_path, model_load_kwargs):
@@ -57,8 +57,8 @@ class KimiAudioMotionModel(MoonshotKimiaMotionForCausalLM):
 
         audio_model.save_pretrained(output_dir)
 
-        shutil.copyfile("/root/pengyang/codebase/HRI_MLLM/HRI_mllm/model/kimi_motion/config.py", os.path.join(output_dir, "configuration_moonshot_kimia.py"))
-        shutil.copyfile("/root/pengyang/codebase/HRI_MLLM/HRI_mllm/model/kimi_motion/model.py", os.path.join(output_dir, "modeling_moonshot_kimia.py"))
+        shutil.copyfile("/root/workspace/HRI_MLLM/HRI_mllm/model/kimi_motion/config.py", os.path.join(output_dir, "configuration_moonshot_kimia.py"))
+        shutil.copyfile("/root/workspace/HRI_MLLM/HRI_mllm/model/kimi_motion/model.py", os.path.join(output_dir, "modeling_moonshot_kimia.py"))
 
         from kimia_infer.models.tokenizer.whisper_Lv3.whisper import WhisperModel
 
