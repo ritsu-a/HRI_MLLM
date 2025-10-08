@@ -1,32 +1,15 @@
+
+
 import os
+os.environ['MUJOCO_GL'] = 'egl'
+from HRI_mllm.external.GMR.scripts.vis_csv_motion import vis_audio_motion
+from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.io.motion_pkl_to_csv import load_npz_as_csv_data
+import numpy as np
 
-def find_wav_files(root_dir, output_file):
-    """
-    查找指定目录及其子目录中的所有WAV文件，并将路径写入文本文件
-    
-    Args:
-        root_dir (str): 要搜索的根目录路径
-        output_file (str): 输出文本文件的路径
-    """
-    with open(output_file, 'w', encoding='utf-8') as f:
-        for root, dirs, files in os.walk(root_dir):
-            for file in files:
-                
-                if file.endswith('.TextGrid'):
-                    full_path = os.path.join(root, file).replace(".TextGrid", ".wav")
-                    f.write(full_path + '\n')
-                    print(f"找到WAV文件: {full_path}")
 
-if __name__ == "__main__":
-    # 设置要搜索的根目录（可以修改为你的目标目录）
-    root_directory = "/root/pengyang/codebase/HRI_MLLM/data/beat_english_v0.2.1"
-    
-    # 设置输出文件路径（可以修改为你想要的输出路径）
-    output_txt = "all.txt"
-    
-    # 检查输入的目录是否存在
-    if not os.path.isdir(root_directory):
-        print(f"错误: 目录 '{root_directory}' 不存在!")
-    else:
-        find_wav_files(root_directory, output_txt)
-        print(f"\n完成! 所有WAV文件路径已保存到: {output_txt}")
+motion_csv = load_npz_as_csv_data("/root/workspace/HRI_MLLM/data/generated_wav_short_3s_with_motion/HAND_WRITE-3/1.npz")
+np.savetxt("test1.csv", motion_csv, delimiter=",")
+
+
+
+vis_audio_motion("audio.wav", "test1.csv", output_path="final_output_2.mp4", robot_type="unitree_inspire_hands", rate_limit=False)

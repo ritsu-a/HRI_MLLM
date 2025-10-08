@@ -24,8 +24,16 @@ class LazySupervisedDataset(Dataset):
 
         self.pad_token = self.extra_tokens.pad
         self.kimia_token_offset = kimia_token_offset
-        self.raw_data = raw_data_list
+        self.raw_data = []
+        
+        ### remove too long sequences
+        for data in raw_data_list:
+            if len(data['conversation'][1]['audio_tokens']) < 1000:
+                self.raw_data.append(data)
+        print("Loading  {} samples in the dataset".format(len(self.raw_data)))
 
+        # 存储motion_blank用于collate_fn
+        self.motion_blank = self.extra_tokens.motion_blank
 
         ### TODO: segment too long sequence in raw_data
 
@@ -36,22 +44,6 @@ class LazySupervisedDataset(Dataset):
 
     def extract_whisper_feat(self, wav: str):
         wav = librosa.load(wav, sr=16000)[0]
-        # if isinstance(wav, str):
-        #     wav = librosa.load(wav, sr=16000)[0]
-
-        #     wav_tensor = torch.tensor(wav).unsqueeze(0)[:, :]
-        # elif isinstance(wav, torch.Tensor):
-        #     wav_tensor = wav
-        # else:
-        #     raise ValueError(f"Invalid wav type: {type(wav)}")
-
-        # wav_tensor = wav_tensor.to(torch.cuda.current_device())
-        # continous_feature = self.whisper_model(wav_tensor)
-        # continous_feature = continous_feature.reshape(
-        #     continous_feature.shape[0],
-        #     int(continous_feature.shape[1] // 4),
-        #     continous_feature.shape[2] * 4,
-        # )
         return wav
 
     def _tokenize_text(self, text):
@@ -160,9 +152,6 @@ class LazySupervisedDataset(Dataset):
                 kimia_content_msg.text_append(self.extra_tokens.kimia_text_blank)
                 kimia_content_msg.motion_append(self.extra_tokens.motion_blank)
 
-            # if extract_whisper_feature:
-            #     whisper_feature = self.extract_whisper_feat(message["content"])
-            #     kimia_content_msg.continuous_feature.append(whisper_feature)
         elif message["message_type"] == None:
             pass
         else:
@@ -287,8 +276,6 @@ class LazySupervisedDataset(Dataset):
             ),
         )
 
-        print(audio_labels.shape)
-
         return ret
 
     @staticmethod
@@ -297,4 +284,102 @@ class LazySupervisedDataset(Dataset):
 
         return batch[0]
 
-
+    # def collate_fn(self, batch):
+    #     """支持更大batch size的collate函数"""
+    #     if len(batch) == 0:
+    #         return {}
+        
+    #     # 获取batch中所有样本
+    #     batch_dict = {}
+        
+    #     # 处理普通张量字段
+    #     tensor_fields = ['input_ids', 'motion_input_ids', 'text_input_ids', 'is_continuous_mask']
+        
+    #     for field in tensor_fields:
+    #         if field in batch[0]:
+    #             # 收集所有样本的该字段
+    #             tensors = [item[field] for item in batch]
+    #             # 获取最大长度
+    #             max_len = max(tensor.shape[1] for tensor in tensors)
+                
+    #             # 对每个张量进行padding
+    #             padded_tensors = []
+    #             for tensor in tensors:
+    #                 current_len = tensor.shape[1]
+    #                 if current_len < max_len:
+    #                     # 计算需要padding的长度
+    #                     pad_len = max_len - current_len
+    #                     if field == 'motion_input_ids':
+    #                         # motion使用motion_blank进行padding
+    #                         pad_value = self.motion_blank
+    #                     else:
+    #                         # 其他字段使用pad_token
+    #                         pad_value = self.pad_token
+                        
+    #                     # 进行padding (在序列维度)
+    #                     padding = tensor.new_full((tensor.shape[0], pad_len), pad_value)
+    #                     padded_tensor = torch.cat([tensor, padding], dim=1)
+    #                     padded_tensors.append(padded_tensor)
+    #                 else:
+    #                     padded_tensors.append(tensor)
+                
+    #             # 堆叠所有张量
+    #             batch_dict[field] = torch.cat(padded_tensors, dim=0)
+        
+    #     # 处理labels元组
+    #     if 'labels' in batch[0]:
+    #         # 解构labels元组
+    #         audio_labels_list = []
+    #         motion_labels_list = []
+    #         text_labels_list = []
+    #         audio_loss_mask_list = []
+    #         motion_loss_mask_list = []
+    #         text_loss_mask_list = []
+            
+    #         for item in batch:
+    #             labels = item['labels']
+    #             audio_labels_list.append(labels[0])
+    #             motion_labels_list.append(labels[1])
+    #             text_labels_list.append(labels[2])
+    #             audio_loss_mask_list.append(labels[3])
+    #             motion_loss_mask_list.append(labels[4])
+    #             text_loss_mask_list.append(labels[5])
+            
+    #         # 对每个labels组件进行padding
+    #         labels_components = [
+    #             (audio_labels_list, self.pad_token),
+    #             (motion_labels_list, self.motion_blank),
+    #             (text_labels_list, self.pad_token),
+    #             (audio_loss_mask_list, False),
+    #             (motion_loss_mask_list, False),
+    #             (text_loss_mask_list, False)
+    #         ]
+            
+    #         padded_labels_components = []
+            
+    #         for component_list, pad_value in labels_components:
+    #             max_len = max(tensor.shape[1] for tensor in component_list)
+    #             padded_components = []
+                
+    #             for tensor in component_list:
+    #                 current_len = tensor.shape[1]
+    #                 if current_len < max_len:
+    #                     pad_len = max_len - current_len
+    #                     padding = tensor.new_full((tensor.shape[0], pad_len), pad_value)
+    #                     padded_tensor = torch.cat([tensor, padding], dim=1)
+    #                     padded_components.append(padded_tensor)
+    #                 else:
+    #                     padded_components.append(tensor)
+                
+    #             padded_labels_components.append(torch.cat(padded_components, dim=0))
+            
+    #         # 重新组合labels元组
+    #         batch_dict['labels'] = tuple(padded_labels_components)
+        
+    #     # 处理whisper_input_feature（如果是列表）
+    #     if 'whisper_input_feature' in batch[0]:
+    #         # 直接收集所有特征，不进行padding（因为可能是变长特征）
+    #         whisper_features = [item['whisper_input_feature'] for item in batch]
+    #         batch_dict['whisper_input_feature'] = whisper_features
+        
+    #     return batch_dict

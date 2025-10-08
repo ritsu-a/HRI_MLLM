@@ -27,8 +27,6 @@ logger = logging.getLogger(__name__)
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
 os.environ["WANDB_PROJECT"] = "Kimi-Audio-Motion-7B-finetune"  # 设置WandB项目名称
-os.environ["WANDB_LOG_MODEL"] = "false"  # 如果你想将模型检查点保存为WandB工件（artifact）
-os.environ["WANDB_WATCH"] = "false"     # 通常"false"日志记录更快，如需梯度等可设为"all"
 
 
 @dataclass
@@ -60,7 +58,10 @@ class TrainingArguments(transformers.TrainingArguments):
             "help": "Maximum sequence length. Sequences will be right padded (and possibly truncated)."
         },
     )
+
     report_to: str = field(default="wandb")   # 添加这一行
+    run_name: Optional[str] = field(default="motion_model_v1", metadata={"help": "The name of the run."})
+    entity: Optional[str] = field(default="pyshi", metadata={"help": "The entity to run the project under."})
 
 
 
@@ -180,6 +181,7 @@ def train():
     for param in model.motion_output.parameters():
         param.requires_grad = True
 
+
     text_tokenizer = AutoTokenizer.from_pretrained(
         cache_path, trust_remote_code=True
     )
@@ -197,7 +199,7 @@ def train():
         audio_labels, motion_labels, text_labels, audio_loss_mask, motion_loss_mask, text_loss_mask = labels
         assert audio_labels.shape[0] == 1, print("we only support micro batch size 1 for demo purpose")
         
-
+        import ipdb;ipdb.set_trace()
         audio_loss = torch.nn.functional.cross_entropy(audio_logits.view(-1, audio_logits.shape[-1]), audio_labels.view(-1), reduction="none")
         motion_loss = torch.nn.functional.cross_entropy(motion_logits.view(-1, motion_logits.shape[-1]), motion_labels.view(-1), reduction="none")
         text_loss = torch.nn.functional.cross_entropy(text_logits.view(-1, text_logits.shape[-1]), text_labels.view(-1), reduction="none")

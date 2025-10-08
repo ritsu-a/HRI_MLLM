@@ -7,7 +7,7 @@ Install:
 
     cd HRI_mllm/external/HRI_retarget
     git checkout g1_hri_mllm(maybe not need this line?)
-
+···
 
     pip install -e .
 
@@ -59,10 +59,10 @@ After change llm model, create a randomized base model based on kimi-audio-7b-in
 Create finetune dataset:
     python HRI_mllm/datasets/BEAT_preprocess/create_jsonl.py
 
-CUDA_VISIBLE_DEVICES=0 python /root/pengyang/codebase/HRI_MLLM/HRI_mllm/train/finetune_kimi_motion.py \
+CUDA_VISIBLE_DEVICES=0 python /root/workspace/HRI_MLLM/HRI_mllm/train/finetune_kimi_motion.py \
     --model_name_or_path "output/motion_model/Kimi-Audio-Motion-7B" \
     --model_path "output/motion_model/Kimi-Audio-Motion-7B" \
-    --data_path "/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi/beat_v1_full.jsonl" \
+    --data_path "/root/workspace/HRI_MLLM/data/BEAT_v1_kimi/beat_v1_full.jsonl" \
     --eval_ratio 0.05 \
     --bf16 True \
     --output_dir output/kimiaudio_ckpts \
@@ -84,7 +84,7 @@ CUDA_VISIBLE_DEVICES=0 python /root/pengyang/codebase/HRI_MLLM/HRI_mllm/train/fi
     --model_max_length 512 \
     --gradient_checkpointing True \
     --lazy_preprocess True \
-    --deepspeed /root/pengyang/codebase/HRI_MLLM/HRI_mllm/finetune/ds_config_zero3.json
+    --deepspeed /root/workspace/HRI_MLLM/HRI_mllm/finetune/ds_config_zero3.json
 
 
 3. Finetune the model.
