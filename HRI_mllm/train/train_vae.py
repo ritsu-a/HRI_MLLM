@@ -33,10 +33,10 @@ def collate_fn(batch):
     
 def load_dataset():
     dataset = G1ML3DDataModule(stage="vae", split="train", 
-                               nfeats=179,
-                               data_root=os.path.join(DATA_ROOT, "BEAT_v1_kimi"),
-                               dis_data_root=os.path.join(DATA_ROOT, "BEAT_v1_kimi"), ### mean and std
-                               dataset_name="BEAT_v1_kimi",
+                               nfeats=383,
+                               data_root=os.path.join(DATA_ROOT, "BEAT_v2_kimi"),
+                               dis_data_root=os.path.join(DATA_ROOT, "BEAT_v2_kimi"), ### mean and std
+                               dataset_name="BEAT_v2_kimi",
                                )
     train_dataset = dataset.train_dataset
     val_dataset = dataset.val_dataset
@@ -162,7 +162,7 @@ def train_vqvae(config, train_loader, val_loader):
         
         # 保存模型 checkpoint
         if epoch % 5 == 0:
-            torch.save(motion_vae.state_dict(), f"output/VQVAE_body/checkpoints/vqvae_epoch_{epoch}.pt")
+            torch.save(motion_vae.state_dict(), f"output/VQVAE_full/checkpoints/vqvae_epoch_{epoch}.pt")
             wandb.save(f"vqvae_epoch_{epoch}.pt")  # 上传到 wandb
     
     return motion_vae
@@ -170,7 +170,7 @@ def train_vqvae(config, train_loader, val_loader):
 # 主函数
 if __name__ == "__main__":
     # 加载配置
-    motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "g1_vqvae_body.yaml"))
+    motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "g1_vqvae_full.yaml"))
     motion_config["epochs"] = 500  # 训练 epoch 数
     motion_config["lr"] = 1e-4   # 学习率
     
@@ -184,5 +184,5 @@ if __name__ == "__main__":
     trained_vae = train_vqvae(motion_config, train_loader, val_loader)
     
     # 保存最终模型
-    torch.save(trained_vae.state_dict(), "vqvae_final.pt")
+    torch.save(trained_vae.state_dict(), "vqvae_final_v2.pt")
     wandb.save("vqvae_final.pt")  # 上传到 wandb

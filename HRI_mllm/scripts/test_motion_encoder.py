@@ -1,5 +1,5 @@
 from HRI_mllm.model.motion_encoder.vqvae import VQVae, VQVAE_Trans
-from HRI_mllm import ROOT
+from HRI_mllm import DATA_ROOT, ROOT
 
 from collections import OrderedDict
 from HRI_mllm.utils.motion_utils.g1ml3d import feats2joints
@@ -20,7 +20,7 @@ def open_yaml(path):
     return data        
 
 ### loading motion VQVAE
-motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "g1_vqvae.yaml"))
+motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "g1_vqvae_full.yaml"))
 motion_vae = VQVae(**motion_config)
 state_dict = torch.load(motion_config["ckpt"], map_location="cpu", weights_only=False)
 motion_vae.load_state_dict(state_dict, strict=True)
@@ -30,13 +30,18 @@ motion_vae.to(device="cuda")
 
 
 ### loading G1ML3D dataset
-dataset = G1ML3DDataModule(stage="vae", split="train")
+dataset = G1ML3DDataModule(stage="vae", split="train", 
+                            nfeats=383,
+                            data_root=os.path.join(DATA_ROOT, "BEAT_v2_kimi"),
+                            dis_data_root=os.path.join(DATA_ROOT, "BEAT_v2_kimi"), ### mean and std
+                            dataset_name="BEAT_v2_kimi",
+                            )
 train_dataset = dataset.train_dataset
 
 
 
 
-### decode 280 dim feature into g1 motion pickle
+### decode 383 dim feature into g1 motion pickle
 import os
 from pathlib import Path 
 from HRI_mllm import ROOT

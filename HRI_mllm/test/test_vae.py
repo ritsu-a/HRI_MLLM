@@ -1,21 +1,25 @@
 import os
+
+os.environ['MUJOCO_GL'] = 'egl'
 from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.io.motion_pkl_to_csv import load_motion_pkl_as_csv_data
 import yaml
 import torch
-import wandb
 import pickle
 from pathlib import Path
 from torch.utils.data import DataLoader
 from HRI_mllm import ROOT, DATA_ROOT
 from HRI_mllm.model.motion_encoder.vqvae import VQVae
 from HRI_mllm.datasets.G1ML3D import G1ML3DDataModule
-from HRI_mllm.utils.motion_utils.g1ml3d import feats2datapkl, feats2joints, normalize_features
+from HRI_mllm.utils.motion_utils.g1ml3d import feats2datapkl, feats2joints, normalize_vec
 from HRI_mllm.utils.motion_utils.metrics import calc_mpjpe, calc_pampjpe
+from HRI_mllm.train.train_vae import load_dataset
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
 
+from HRI_mllm.external.GMR.scripts.vis_csv_motion import vis_audio_motion
 import joblib
+
 
 
 # 加载配置文件
@@ -23,10 +27,7 @@ def open_yaml(path):
     with open(path, 'r', encoding="utf-8") as file:
         return yaml.safe_load(file)
 
-# 初始化 wandb
-wandb.init(mode='offline', project="motion-vqvae", entity="ritsu")  # 替换为你的 wandb 用户名
 
-# 加载数据集
 
 def collate_fn(batch):
     motions = torch.stack([torch.from_numpy(item[1]) for item in batch])
@@ -34,33 +35,7 @@ def collate_fn(batch):
         print("Found NaN in motion data")
         import ipdb;ipdb.set_trace()
     return motions
-    
-def load_dataset():
-    dataset = G1ML3DDataModule(stage="vae", split="train", 
-                               nfeats=280,
-                               data_root=os.path.join(DATA_ROOT, "BEAT_TTS"),
-                               dis_data_root=os.path.join(DATA_ROOT, "G1ML3D_v1"), ### mean and std
-                               dataset_name="BEAT_TTS",
-                               )
-    train_dataset = dataset.train_dataset
-    val_dataset = dataset.val_dataset
-    # for _, motions, length, _, _, _, _, name, idx in train_dataset:
-    #     motions = torch.from_numpy(motions)
-    #     if motions.isnan().any():
-    #         print("Found NaN in motion data")
-    #         import ipdb;ipdb.set_trace()
-    #     if motions.shape[0] < 64:
-    #         print(f"Skipping motion with length {motions.shape[0]}")
-    #         continue
-    #     if motions.shape[1] != 280:  # 确保关节数量正确
-    #         print(f"Skipping motion with incorrect joint count: {motions.shape[1]}")
-    #         continue
-    
 
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4, collate_fn=collate_fn)
-    val_dataset = dataset.val_dataset
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4, collate_fn=collate_fn)
-    return train_loader, val_loader
 
 # 在验证集上测试 MPJPE 和 PA-MPJPE
 def validate(model, val_loader, device):
@@ -93,9 +68,7 @@ def validate(model, val_loader, device):
 
 # 主函数
 if __name__ == "__main__":
-    
-    # 加载数据
-    train_loader, val_loader = load_dataset()
+
     
 
     ### loading motion vae 
@@ -103,29 +76,36 @@ if __name__ == "__main__":
         with open(path, 'r', encoding="utf-8") as file:
             data = yaml.safe_load(file)
         return data    
-    motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "g1_vqvae.yaml"))
+    motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "g1_vqvae_full.yaml"))
     motion_vae = VQVae(**motion_config)
     state_dict = torch.load(motion_config["ckpt"], map_location="cpu", weights_only=False)
     motion_vae.load_state_dict(state_dict, strict=True)
     motion_vae.eval()
     motion_vae.to(device="cuda")
 
-    ### compute mpjpe
-    mpjpe, pampjpe = validate(motion_vae, train_loader, device="cuda")
-    print(f"Validation MPJPE: {mpjpe:.4f}, PA-MPJPE: {pampjpe:.4f}")
+    # ### compute mpjpe
+        
+    # # 加载数据
+    # train_loader, val_loader = load_dataset()
+    # mpjpe, pampjpe = validate(motion_vae, train_loader, device="cuda")
+    # print(f"Validation MPJPE: {mpjpe:.4f}, PA-MPJPE: {pampjpe:.4f}")
 
     ### encode&decode for specific motion
 
-    train_data_feature = np.load(f"/root/pengyang/codebase/HRI_MLLM/data/BEAT_TTS/new_joint_vecs/6_carla_0_63_63_joint_vecs.npy")
 
-    import ipdb;ipdb.set_trace()
+    beat_vec_path = f"/root/workspace/HRI_MLLM/data/BEAT_v2_kimi/new_joint_vecs/1_wayne_0_1_1.npy"
+    train_data_vec = np.load(beat_vec_path)
+    beat_filename = beat_vec_path.split("/")[-1]
+    audio_path = os.path.join("/root/workspace/HRI_MLLM/data/BEAT_v2", beat_filename.split("_")[0], beat_filename.replace(".npy", ".wav"))
 
-    motion_tokens = motion_vae.encode(normalize_features(torch.from_numpy(train_data_feature).unsqueeze(0).to("cuda:0")))[0].detach().cpu()
+
+
+    motion_tokens = motion_vae.encode(normalize_vec(torch.from_numpy(train_data_vec).unsqueeze(0).to("cuda:0")))[0].detach().cpu()
 
     decoded_features = motion_vae.decode(motion_tokens.to("cuda:0")).detach().cpu()
 
     decoded_data_pkl = feats2datapkl(decoded_features)
-    source_data_pkl = feats2datapkl(torch.from_numpy(train_data_feature).unsqueeze(0))
+    source_data_pkl = feats2datapkl(normalize_vec(torch.from_numpy(train_data_vec).unsqueeze(0).to("cuda:0")))
 
 
     with open("source.pkl", 'wb') as f:
@@ -137,6 +117,11 @@ if __name__ == "__main__":
     source_csv =  load_motion_pkl_as_csv_data("source.pkl")
     decoded_csv =  load_motion_pkl_as_csv_data("decoded.pkl")
 
+    import ipdb;ipdb.set_trace()
+
     np.savetxt("source.csv", source_csv, delimiter=',', fmt='%.8f')
     np.savetxt("decoded.csv", decoded_csv, delimiter=',', fmt='%.8f')
+
+    vis_audio_motion(audio_path, "source.csv", output_path="final_output_source.mp4", robot_type="g1_brainco", rate_limit=False)
+    vis_audio_motion(audio_path, "decoded.csv", output_path="final_output_decoded.mp4", robot_type="g1_brainco", rate_limit=False)
     

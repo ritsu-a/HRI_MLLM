@@ -15,7 +15,7 @@ from scipy.spatial.transform import Slerp
 from scipy.spatial.transform import Rotation as R
 
 from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.torch_utils.diff_quat import vec6d_to_quat
-from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.io.inspirehand_representation import data_pkl_to_vec
+from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.io.brainco_representation import data_pkl_to_vec
 
 from HRI_mllm.model.qwen2_5omni import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
 from HRI_mllm.utils.qwen_omni_utils import process_mm_info, process_audio_info

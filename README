@@ -17,7 +17,7 @@ Install:
 
 Compute joint_vec:
     python HRI_mllm/external/HRI_retarget/HRI_retarget/scripts/g1ml3d_motion_representation.py 
-    python HRI_mllm/external/HRI_retarget/HRI_retarget/utils/io/inspirehand_mean_variance.py
+    python HRI_mllm/external/HRI_retarget/HRI_retarget/utils/io/brainco_mean_variance.py
 
     remember to change path in /root/pengyang/codebase/HRI_MLLM/HRI_mllm/utils/motion_utils/g1ml3d.py
     copy texts folder

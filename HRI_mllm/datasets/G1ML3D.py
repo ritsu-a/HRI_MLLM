@@ -3,7 +3,7 @@ import torch
 import os 
 from os.path import join as pjoin
 # from .humanml.utils.word_vectorizer import WordVectorizer
-from HRI_mllm.utils.motion_utils.g1ml3d import recover_from_ric
+# from HRI_mllm.utils.motion_utils.g1ml3d import recover_from_ric
 from .BaseDataModule import BASEDataModule
 from .T2M_dataset import Text2MotionDataset
 # from .humanml import Text2MotionDatasetEval, Text2MotionDataset, Text2MotionDatasetCB, MotionDataset, MotionDatasetVQ, Text2MotionDatasetToken, Text2MotionDatasetM2T
@@ -140,11 +140,11 @@ class G1ML3DDataModule(BASEDataModule):
         
         
 
-    def feats2joints(self, features):
-        mean = torch.tensor(self.hparams.mean).to(features)
-        std = torch.tensor(self.hparams.std).to(features)
-        features = features * std + mean
-        return recover_from_ric(features)
+    # def feats2joints(self, features):
+    #     mean = torch.tensor(self.hparams.mean).to(features)
+    #     std = torch.tensor(self.hparams.std).to(features)
+    #     features = features * std + mean
+    #     return recover_from_ric(features)
 
 
     def normalize(self, features):
