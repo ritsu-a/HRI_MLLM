@@ -11,9 +11,9 @@ from tqdm import tqdm
 from HRI_mllm.datasets.BEATAudioMotionDataset import BEATAudioMotionDataset
 from HRI_mllm.model.gpt2_adaptor.model import MixedInputGPT2
 
-exp_name = "kimi_audio_motion_gpt2_hidden_30_100"
-os.makedirs(os.path.join("output/motion_adaptor_v1", exp_name), exist_ok=True)
-os.makedirs(os.path.join("output/motion_adaptor_v1", exp_name, "checkpoints"), exist_ok=True)
+exp_name = "kimi_audio_motion_gpt2_brainco_30_100"
+os.makedirs(os.path.join("output/motion_adaptor_v2", exp_name), exist_ok=True)
+os.makedirs(os.path.join("output/motion_adaptor_v2", exp_name, "checkpoints"), exist_ok=True)
 
 os.environ["WANDB_MODE"] = "offline"
 
@@ -34,17 +34,17 @@ if local_rank == 0:
     wandb.init(
         project="audio-motion-BEAT-gpt2-adaptor",
         config={
-            "beat_tts_root": "/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi",
+            "beat_tts_root": "/root/workspace/HRI_MLLM/data/BEAT_v2_kimi",
             "audio_vocab_size": 16384,
-            "motion_vocab_size": 512,
-            "total_vocab_size": 512 + 2,
+            "motion_vocab_size": 1024,
+            "total_vocab_size": 1024 + 2,
             "max_seq_length": 4096,
             "min_seq_length": 128,
             "batch_size": 8,
             "learning_rate": 1e-4,
             "epochs": 1000,
             "sliding_window_step": 32,
-            "pad_token_id": 513,
+            "pad_token_id": 1024 + 1,
             "interleave_ratio": [1, 1],
             "exp_name": exp_name,
         }
@@ -53,17 +53,17 @@ if local_rank == 0:
 else:
     # 非主进程使用相同的配置
     config = type('Config', (), {
-        "beat_tts_root": "/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi",
+        "beat_tts_root": "/root/workspace/HRI_MLLM/data/BEAT_v2_kimi",
         "audio_vocab_size": 16384,
-        "motion_vocab_size": 512,
-        "total_vocab_size": 512 + 2,
+        "motion_vocab_size": 1024,
+        "total_vocab_size": 1024 + 2,
         "max_seq_length": 4096,
         "min_seq_length": 128,
         "batch_size": 8,
         "learning_rate": 1e-4,
         "epochs": 1000,
         "sliding_window_step": 32,
-        "pad_token_id": 513,
+        "pad_token_id": 1024 + 1,
         "interleave_ratio": [1, 1],
         "exp_name":exp_name,
     })()
@@ -106,8 +106,8 @@ if local_rank == 0:
 
 # 数据加载器
 def collate_fn(batch):
-    tokens = torch.stack([item['tokens'] for item in batch])
-    masks = torch.stack([item['mask'] for item in batch])
+    tokens = torch.stack([item['tokens'] for item in batch]).long()
+    masks = torch.stack([item['mask'] for item in batch]).long()
     lengths = torch.tensor([item['seq_length'] for item in batch])
     return {'tokens': tokens, 'mask': masks, 'lengths': lengths}
 
@@ -155,15 +155,15 @@ for epoch in range(config.epochs):
         dataloader_iter = dataloader
         
     for step, batch in enumerate(dataloader_iter):
-        inputs = batch['tokens'].to(device, non_blocking=True)
-        masks = batch['mask'].to(device, non_blocking=True)
+        inputs = batch['tokens'].to(device, non_blocking=True).long()
+        masks = batch['mask'].to(device, non_blocking=True).long()
         lengths = batch['lengths']
         
         # 创建注意力掩码（忽略填充位置）
         attn_mask = (inputs != dataset.SEQ_PAD_TOKEN).float().to(device)
         
         # 创建标签
-        labels = inputs.clone()
+        labels = inputs.clone().long()
         labels[masks == 0] = -100  # 只计算motion位置的损失
         
         # 模型前向
@@ -217,7 +217,7 @@ for epoch in range(config.epochs):
         
         # 保存检查点
         if (epoch + 1) % 50 == 0:
-            ckpt_path = f"output/motion_adaptor_v1/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
+            ckpt_path = f"output/motion_adaptor_v2/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
             torch.save({
                 'epoch': epoch,
                 'model_state': model.module.state_dict(),
@@ -227,7 +227,7 @@ for epoch in range(config.epochs):
 
 # 保存最终模型
 if local_rank == 0:
-    model.module.save_pretrained(f"output/motion_adaptor_v1/{config.exp_name}")
+    model.module.save_pretrained(f"output/motion_adaptor_v2/{config.exp_name}")
 
 # 清理分布式进程
 dist.destroy_process_group()

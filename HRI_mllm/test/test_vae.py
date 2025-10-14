@@ -9,6 +9,8 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 from HRI_mllm import ROOT, DATA_ROOT
 from HRI_mllm.model.motion_encoder.vqvae import VQVae
+from HRI_mllm.model.motion_encoder.vqvae_body_hand import VQVaeBodyHand
+
 from HRI_mllm.datasets.G1ML3D import G1ML3DDataModule
 from HRI_mllm.utils.motion_utils.g1ml3d import feats2datapkl, feats2joints, normalize_vec
 from HRI_mllm.utils.motion_utils.metrics import calc_mpjpe, calc_pampjpe
@@ -77,7 +79,7 @@ if __name__ == "__main__":
             data = yaml.safe_load(file)
         return data    
     motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "g1_vqvae_full.yaml"))
-    motion_vae = VQVae(**motion_config)
+    motion_vae = VQVaeBodyHand(**motion_config)
     state_dict = torch.load(motion_config["ckpt"], map_location="cpu", weights_only=False)
     motion_vae.load_state_dict(state_dict, strict=True)
     motion_vae.eval()
@@ -100,9 +102,9 @@ if __name__ == "__main__":
 
 
 
-    motion_tokens = motion_vae.encode(normalize_vec(torch.from_numpy(train_data_vec).unsqueeze(0).to("cuda:0")))[0].detach().cpu()
+    motion_tokens = motion_vae.encode(normalize_vec(torch.from_numpy(train_data_vec).unsqueeze(0).to("cuda:0")))[0]
 
-    decoded_features = motion_vae.decode(motion_tokens.to("cuda:0")).detach().cpu()
+    decoded_features = motion_vae.decode(motion_tokens).detach().cpu()
 
     decoded_data_pkl = feats2datapkl(decoded_features)
     source_data_pkl = feats2datapkl(normalize_vec(torch.from_numpy(train_data_vec).unsqueeze(0).to("cuda:0")))

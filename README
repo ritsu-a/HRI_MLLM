@@ -25,6 +25,9 @@ Compute joint_vec:
 
 Train motion VQVAE:
     python HRI_mllm/train/train_vae.py
+
+    torchrun --nnodes=1 --nproc_per_node=8 HRI_mllm/train/train_vae.py 
+
     TODO: fix /root/pengyang/codebase/HRI_MLLM/HRI_mllm/datasets/G1ML3D.py remove all cfg dependency
 
 VQVAE:
@@ -39,6 +42,7 @@ Generate tokens for dataset:
 Train motion adaptor:
     generate motion tokens first:
         python HRI_mllm/scripts/generate_motion_tokens.py
+        python HRI_mllm/scripts/create_jsonl.py
 
     then 
         python -m torch.distributed.launch --nproc_per_node=8 --nnodes=1 --node_rank=0 \
@@ -109,6 +113,19 @@ You can infer with the finetuned model by running:
     ```bash
     CUDA_VISIBLE_DEVICES=0 python -m finetune_codes.check_sft_infer
     ```
+
+
+Beat test:
+python /root/workspace/HRI_MLLM/beat_test.py \
+  --audio /root/workspace/HRI_MLLM/data/BEAT_v2/1/1_wayne_0_1_1.wav \
+  --motion /root/workspace/HRI_MLLM/data/BEAT_v2/1/1_wayne_0_1_1.npz \
+  --fps 30 \
+  --tol 0.15 \
+  --min_interval 0.2 \
+  --prominence_scale 0.5 \
+  --dbn_fps 100 \
+  --save_debug_dir /root/workspace/HRI_MLLM/beat_debug \
+  --plot_path /root/workspace/HRI_MLLM/beat_debug/beat_motion_rhythm.png
 
 Server:
     python HRI_mllm/inference/text_response_server.py

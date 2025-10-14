@@ -22,6 +22,8 @@ from HRI_mllm.utils.qwen_omni_utils import process_mm_info, process_audio_info
 from HRI_mllm.model.qwen2_5omni.streamers import QwenTextStreamer
 
 from HRI_mllm.model.motion_encoder.vqvae import VQVae, VQVAE_Trans
+from HRI_mllm.model.motion_encoder.vqvae_body_hand import VQVaeBodyHand
+
 from HRI_mllm import ROOT
 
 from huggingface_hub import snapshot_download
@@ -66,9 +68,9 @@ def load_token2wav():
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--audio_path", type=str, default="/root/pengyang/codebase/HRI_MLLM/data/beat_english_v0.2.1/all.txt")
-    parser.add_argument("--motion_root", type=str, default="/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1")
-    parser.add_argument("--save_path", type=str, default="/root/pengyang/codebase/HRI_MLLM/data/BEAT_v1_kimi")
+    parser.add_argument("--audio_path", type=str, default="/root/workspace/HRI_MLLM/data/beat_english_v0.2.1/all.txt")
+    parser.add_argument("--motion_root", type=str, default="/root/workspace/HRI_MLLM/data/BEAT_v2_kimi/new_joint_vecs")
+    parser.add_argument("--save_path", type=str, default="/root/workspace/HRI_MLLM/data/BEAT_v2_kimi")
     parser.add_argument("--model_name_or_path", type=str, default="moonshotai/Kimi-Audio-7B")
 
 
@@ -97,8 +99,8 @@ if __name__ == "__main__":
         with open(path, 'r', encoding="utf-8") as file:
             data = yaml.safe_load(file)
         return data        
-    motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "g1_vqvae_body.yaml"))
-    motion_vae = VQVae(**motion_config)
+    motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "g1_vqvae_full.yaml"))
+    motion_vae = VQVaeBodyHand(**motion_config)
     state_dict = torch.load(motion_config["ckpt"], map_location="cpu", weights_only=False)
     motion_vae.load_state_dict(state_dict, strict=True)
     motion_vae.eval()
@@ -123,7 +125,7 @@ if __name__ == "__main__":
     for idx in tqdm(range(total_num)):
 
         source_audio_path = audio_files[idx].strip()
-        motion_path = os.path.join(args.motion_root, source_audio_path.split("/")[-2], source_audio_path.split("/")[-1].replace(".wav", ".pickle"))
+        motion_path = os.path.join(args.motion_root, source_audio_path.split("/")[-1].replace(".wav", ".npy"))
         filename = source_audio_path.split("/")[-1]
 
         audio_path = source_audio_path
@@ -136,19 +138,20 @@ if __name__ == "__main__":
         
 
         
-        with open(motion_path, "rb") as file:
-            motion_pkl = pickle.load(file)
 
 
-
-        g1ml3d_vec = data_pkl_to_vec(motion_pkl)
+        g1ml3d_vec = np.load(motion_path)
 
         # np.save(os.path.join(joint_vecs_save_path, filename.replace(".wav", "_joint_vecs.npy")), g1ml3d_features)
 
 
         from HRI_mllm.utils.motion_utils.g1ml3d import normalize_vec
         
-        motion_tokens = motion_vae.encode(normalize_vec(torch.from_numpy(g1ml3d_vec).unsqueeze(0).to("cuda:0")))[0].detach().cpu()
+        body_tokens, hand_tokens = motion_vae.encode(normalize_vec(torch.from_numpy(g1ml3d_vec).unsqueeze(0).to("cuda:0")))[0]
+
+        motion_tokens = torch.zeros(body_tokens.shape[0], body_tokens.shape[1] + hand_tokens.shape[1])
+        motion_tokens[:, 0::2] = body_tokens
+        motion_tokens[:, 1::2] = hand_tokens + motion_config["code_num"]
 
 
         audio_token_save_path = os.path.join(save_path, filename.replace(".wav", "_audio_tokens.pt"))

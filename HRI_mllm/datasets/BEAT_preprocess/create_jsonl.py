@@ -14,15 +14,15 @@ from HRI_mllm import ROOT, DATA_ROOT, OUTPUT_ROOT
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--audio_path", type=str, default="{DATA_ROOT}/beat_english_v0.2.1/all.txt")
-    parser.add_argument("--motion_root", type=str, default="{DATA_ROOT}/BEAT_v1")
-    parser.add_argument("--data_path", type=str, default="{DATA_ROOT}/BEAT_v1_kimi")
+    parser.add_argument("--audio_path", type=str, default=f"{DATA_ROOT}/beat_english_v0.2.1/all.txt")
+    parser.add_argument("--motion_root", type=str, default=f"{DATA_ROOT}/BEAT_v2")
+    parser.add_argument("--data_path", type=str, default=f"{DATA_ROOT}/BEAT_v2_kimi")
     parser.add_argument("--model_name_or_path", type=str, default="moonshotai/Kimi-Audio-7B")
 
 
     args = parser.parse_args()
     data_list_path = os.path.join(args.data_path, "all.txt")
-    save_path = os.path.join(args.data_path, "beat_v1_full.jsonl")
+    save_path = os.path.join(args.data_path, "beat_full.jsonl")
 
     with open(save_path, "w", encoding="utf-8") as f:
         f.write('')  
