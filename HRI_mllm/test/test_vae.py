@@ -119,7 +119,6 @@ if __name__ == "__main__":
     source_csv =  load_motion_pkl_as_csv_data("source.pkl")
     decoded_csv =  load_motion_pkl_as_csv_data("decoded.pkl")
 
-    import ipdb;ipdb.set_trace()
 
     np.savetxt("source.csv", source_csv, delimiter=',', fmt='%.8f')
     np.savetxt("decoded.csv", decoded_csv, delimiter=',', fmt='%.8f')
