@@ -17,6 +17,10 @@ from tqdm import tqdm
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+qpos_mask = torch.zeros(491)
+qpos_mask[263-17:263] = 1
+qpos_mask[491-24:491] = 1
+
 # 加载配置文件
 def open_yaml(path):
     with open(path, 'r', encoding="utf-8") as file:
@@ -50,7 +54,7 @@ def load_dataset():
                                dataset_name="BEAT_v2_kimi",
                                )
     train_dataset = dataset.train_dataset
-    val_dataset = dataset.val_dataset
+    val_dataset = dataset.train_dataset
 
     # 分布式采样器
     if is_dist_avail_and_initialized():
@@ -67,7 +71,7 @@ def load_dataset():
                               num_workers=4,
                               pin_memory=True,
                               collate_fn=collate_fn)
-    val_dataset = dataset.val_dataset
+    val_dataset = dataset.train_dataset
     val_loader = DataLoader(val_dataset,
                             batch_size=32,
                             shuffle=False,
@@ -126,7 +130,7 @@ def compute_loss(features, x_out, quant_loss, beta: float = 0.25):
         quant_loss: 量化损失
     """
     # 1. 重建损失（假设输入是图像像素值，范围 [0,1]）
-    recon_loss = F.mse_loss(x_out, features, reduction='mean')  # 或用 F.binary_cross_entropy
+    recon_loss = F.mse_loss(x_out, features*qpos_mask.to(features.device), reduction='mean')  # 或用 F.binary_cross_entropy
     
     # 2. 量化损失（直接使用 quantizer 返回的 loss）
     #    通常包含 codebook 的 L2 损失和 commitment loss
@@ -235,9 +239,9 @@ def train_vqvae(config, train_loader, val_loader):
         
         # 保存模型 checkpoint
         if is_main_process() and epoch % 50 == 0:
-            os.makedirs("output/VQVAE_full/checkpoints", exist_ok=True)
+            os.makedirs("output/VQVAE_full_qpos/checkpoints", exist_ok=True)
             target_state_dict = motion_vae.module.state_dict() if hasattr(motion_vae, 'module') else motion_vae.state_dict()
-            torch.save(target_state_dict, f"output/VQVAE_full/checkpoints/vqvae_epoch_{epoch}.pt")
+            torch.save(target_state_dict, f"output/VQVAE_full_qpos/checkpoints/vqvae_epoch_{epoch}.pt")
             wandb.save(f"vqvae_epoch_{epoch}.pt")  # 上传到 wandb
     
     return motion_vae
@@ -250,7 +254,7 @@ if __name__ == "__main__":
         dist.init_process_group(backend="nccl", init_method="env://")
 
     # 加载配置
-    motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "g1_vqvae_full.yaml"))
+    motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "g1_vqvae_full_qpos.yaml"))
     motion_config["epochs"] = motion_config.get("epochs", 1000)
     motion_config["lr"] = motion_config.get("lr", 1e-4)
     motion_config["beta"] = motion_config.get("beta", 0.25)
@@ -259,7 +263,7 @@ if __name__ == "__main__":
     
     # 仅主进程初始化 wandb
     if is_main_process():
-        wandb.init(mode='online', project="motion-vqvae", entity="ritsu")
+        wandb.init(mode='offline', project="motion-vqvae", entity="ritsu")
         wandb.config.update(motion_config)
     
     # 加载数据
@@ -270,10 +274,10 @@ if __name__ == "__main__":
     
     # 保存最终模型（仅主进程）
     if is_main_process():
-        os.makedirs("output/VQVAE_full/checkpoints", exist_ok=True)
+        os.makedirs("output/VQVAE_full_qpos/checkpoints", exist_ok=True)
         target_state_dict = trained_vae.module.state_dict() if hasattr(trained_vae, 'module') else trained_vae.state_dict()
-        torch.save(target_state_dict, "output/VQVAE_full/checkpoints/vqvae_final_v2.pt")
-        wandb.save("vqvae_final_v2.pt")
+        torch.save(target_state_dict, "output/VQVAE_full_qpos/checkpoints/vqvae_final_v4.pt")
+        wandb.save("vqvae_final_v4.pt")
 
     # 结束分布式
     if is_dist_avail_and_initialized():

@@ -4,9 +4,9 @@ lr: 1e-4
 beta: 0.25
 warmup_steps: 500
 clip_grad_norm: 1.0
-code_num: 512
-code_dim: 256
-output_emb_width: 256
+code_num: 1024
+code_dim: 512
+output_emb_width: 512
 down_t: 2
 stride_t: 2
 width: 512
@@ -15,5 +15,5 @@ dilation_growth_rate: 3
 norm: batch_norm
 activation: gelu
 nfeats: 491
-ckpt: "/root/workspace/HRI_MLLM/output/VQVAE_full/checkpoints/vqvae_final_v3.pt"
+ckpt: "/root/workspace/HRI_MLLM/output/VQVAE_full_qpos/checkpoints/vqvae_final_v4.pt"
 

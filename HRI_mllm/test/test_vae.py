@@ -1,5 +1,7 @@
 import os
 
+from HRI_retarget.utils.motion_lib.qpose_denoiser import low_pass_filter
+
 os.environ['MUJOCO_GL'] = 'egl'
 from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.io.motion_pkl_to_csv import load_motion_pkl_as_csv_data
 import yaml
@@ -78,7 +80,7 @@ if __name__ == "__main__":
         with open(path, 'r', encoding="utf-8") as file:
             data = yaml.safe_load(file)
         return data    
-    motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "g1_vqvae_full.yaml"))
+    motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "g1_vqvae_full_qpos.yaml"))
     motion_vae = VQVaeBodyHand(**motion_config)
     state_dict = torch.load(motion_config["ckpt"], map_location="cpu", weights_only=False)
     motion_vae.load_state_dict(state_dict, strict=True)
@@ -97,13 +99,14 @@ if __name__ == "__main__":
 
     beat_vec_path = f"/root/workspace/HRI_MLLM/data/BEAT_v2_kimi/new_joint_vecs/1_wayne_0_1_1.npy"
     train_data_vec = np.load(beat_vec_path)
+
+    beat_vec_path = f"/root/workspace/HRI_MLLM/data/BEAT_v2_kimi/new_joint_vecs/1_wayne_0_1_1.npy"
     beat_filename = beat_vec_path.split("/")[-1]
     audio_path = os.path.join("/root/workspace/HRI_MLLM/data/BEAT_v2", beat_filename.split("_")[0], beat_filename.replace(".npy", ".wav"))
 
 
 
     motion_tokens = motion_vae.encode(normalize_vec(torch.from_numpy(train_data_vec).unsqueeze(0).to("cuda:0")))[0]
-
     decoded_features = motion_vae.decode(motion_tokens).detach().cpu()
 
     decoded_data_pkl = feats2datapkl(decoded_features)
@@ -119,10 +122,9 @@ if __name__ == "__main__":
     source_csv =  load_motion_pkl_as_csv_data("source.pkl")
     decoded_csv =  load_motion_pkl_as_csv_data("decoded.pkl")
 
-
     np.savetxt("source.csv", source_csv, delimiter=',', fmt='%.8f')
     np.savetxt("decoded.csv", decoded_csv, delimiter=',', fmt='%.8f')
 
-    vis_audio_motion(audio_path, "source.csv", output_path="final_output_source.mp4", robot_type="g1_brainco", rate_limit=False)
-    vis_audio_motion(audio_path, "decoded.csv", output_path="final_output_decoded.mp4", robot_type="g1_brainco", rate_limit=False)
+    vis_audio_motion(audio_path, "source.csv", output_path="vqvae_output_source.mp4", robot_type="g1_brainco", rate_limit=False)
+    vis_audio_motion(audio_path, "decoded.csv", output_path="vqvae_output_decoded.mp4", robot_type="g1_brainco", rate_limit=False)
     
