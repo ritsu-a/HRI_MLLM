@@ -25,7 +25,7 @@ class VQVaeBodyHand(nn.Module):
 
         super().__init__()
         assert nfeats == 491, f"nfeats should be 491 for body+hand, but got {nfeats}"
-        self.body_vae = VQVae(nfeats=17,
+        self.body_vae = VQVae(nfeats=263,
                               quantizer=quantizer,
                               code_num=code_num,
                               code_dim=code_dim,
@@ -38,7 +38,7 @@ class VQVaeBodyHand(nn.Module):
                               norm=norm,
                               activation=activation)
         
-        self.hand_vae = VQVae(nfeats=24,
+        self.hand_vae = VQVae(nfeats=228,
                               quantizer=quantizer,
                               code_num=code_num,    
                                 code_dim=code_dim,
@@ -55,8 +55,8 @@ class VQVaeBodyHand(nn.Module):
     def encode(self, x):
         # x: (B, T, 491)
 
-        body_x = x[:, :, 263-17:263]  # (B, T, 263)
-        hand_x = x[:, :, 491-24:491]  # (B, T, 228)
+        body_x = x[:, :, :263]  # (B, T, 263)
+        hand_x = x[:, :, 263:491]  # (B, T, 228)
         body_code, _ = self.body_vae.encode(body_x)  # body_code: (B, T', 263)
         hand_code, _ = self.hand_vae.encode(hand_x)  # hand_code: (B, T', 228)
         return (body_code, hand_code), None
@@ -66,16 +66,14 @@ class VQVaeBodyHand(nn.Module):
         
         body_decoded = self.body_vae.decode(body_code)  # (B, T, 263)
         hand_decoded = self.hand_vae.decode(hand_code)  # (B, T, 228)
-        B, T, _ = body_decoded.shape
-        x_decoded = torch.cat([torch.zeros((B, T, 263-17)).to(body_decoded.device), body_decoded, torch.zeros((B, T, 228-24)).to(body_decoded.device), hand_decoded], dim=-1)  # (B, T, 491)
+        x_decoded = torch.cat([body_decoded, hand_decoded], dim=-1)  # (B, T, 491)
         return x_decoded
     
     def forward(self, x):
-        body_x = x[:, :, 263-17:263]  # (B, T, 263)
-        hand_x = x[:, :, 491-24:491]  # (B, T, 228)
-        B, T, _ = body_x.shape
+        body_x = x[:, :, :263]  # (B, T, 263)
+        hand_x = x[:, :, 263:491]  # (B, T, 228)
         body_recon, body_quant_loss, body_perplexity = self.body_vae(body_x)  # (B, T, 263)
         hand_recon, hand_quant_loss, hand_perplexity = self.hand_vae(hand_x)  # (B, T, 228)
-        x_recon = torch.cat([torch.zeros((B, T, 263-17)).to(body_x.device), body_recon,torch.zeros((B, T, 228-24)).to(body_x.device), hand_recon], dim=-1)  # (B, T, 491)
+        x_recon = torch.cat([body_recon,hand_recon], dim=-1)  # (B, T, 491)
         total_quant_loss = body_quant_loss + hand_quant_loss
         return x_recon, total_quant_loss, (body_perplexity + hand_perplexity) / 2

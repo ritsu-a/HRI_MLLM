@@ -36,15 +36,15 @@ if local_rank == 0:
         config={
             "beat_tts_root": "/root/workspace/HRI_MLLM/data/BEAT_v2_kimi",
             "audio_vocab_size": 16384,
-            "motion_vocab_size": 1024,
-            "total_vocab_size": 1024 + 2,
+            "motion_vocab_size": 1024*2,
+            "total_vocab_size": 1024*2 + 2,
             "max_seq_length": 4096,
             "min_seq_length": 128,
             "batch_size": 8,
             "learning_rate": 1e-4,
-            "epochs": 1000,
+            "epochs": 500,
             "sliding_window_step": 32,
-            "pad_token_id": 1024 + 1,
+            "pad_token_id": 1024*2 + 1,
             "interleave_ratio": [1, 1],
             "exp_name": exp_name,
         }
@@ -55,15 +55,15 @@ else:
     config = type('Config', (), {
         "beat_tts_root": "/root/workspace/HRI_MLLM/data/BEAT_v2_kimi",
         "audio_vocab_size": 16384,
-        "motion_vocab_size": 1024,
-        "total_vocab_size": 1024 + 2,
+        "motion_vocab_size": 1024*2,
+        "total_vocab_size": 1024*2 + 2,
         "max_seq_length": 4096,
         "min_seq_length": 128,
         "batch_size": 8,
         "learning_rate": 1e-4,
-        "epochs": 1000,
+        "epochs": 500,
         "sliding_window_step": 32,
-        "pad_token_id": 1024 + 1,
+        "pad_token_id": 1024*2 + 1,
         "interleave_ratio": [1, 1],
         "exp_name":exp_name,
     })()
@@ -188,7 +188,7 @@ for epoch in range(config.epochs):
         total_loss += loss.item() * accum_steps
         
         # 只在主进程记录指标
-        if local_rank == 0 and {step % 1000 == 0 or step == len(dataloader) - 1}:
+        if local_rank == 0 and {step % 500 == 0 or step == len(dataloader) - 1}:
             log_data = {
                 "train/loss": loss.item() * accum_steps,
                 "train/lr": scheduler.get_last_lr()[0],

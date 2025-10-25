@@ -1,0 +1,40 @@
+# 快速测试配置：用于验证代码和方案
+# 适用场景：快速迭代和调试
+
+quantizer: ema_reset
+epochs: 200  # 快速测试
+lr: 1e-4
+beta: 0.25
+warmup_steps: 100
+clip_grad_norm: 1.0
+
+# 小codebook
+code_num: 256
+code_dim: 256
+output_emb_width: 256
+
+# 编码器配置
+down_t: 2
+stride_t: 2
+width: 256  # 更小的模型
+depth: 2
+dilation_growth_rate: 3
+norm: batch_norm
+activation: gelu
+nfeats: 491
+
+# 标准语义权重
+semantic_weight: 5.0
+seg_weight: 10.0
+beat_weight: 1.0
+
+# 不使用两阶段训练
+use_two_stage_training: false
+
+# 输出配置
+save_interval: 50
+output_dir: "output/vqvae_semantic_quick_test"
+
+# 预训练模型（如果有）
+ckpt: ""
+

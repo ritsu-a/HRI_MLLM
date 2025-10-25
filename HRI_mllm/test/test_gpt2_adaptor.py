@@ -2,6 +2,7 @@
 ### HRI_mllm/model/qwen2_5omni_motion/monkey_patch_generate.py for monkey patching the generate function to support token-level streaming
 
 import os
+import argparse
 
 from HRI_retarget.utils.motion_lib.qpose_denoiser import low_pass_filter
 from huggingface_hub import snapshot_download
@@ -62,15 +63,15 @@ def audioToken2motionPkl(audio_codes, motion_tokens_gt):
     config={
         "beat_tts_root": "/root/workspace/HRI_MLLM/data/BEAT_v2_kimi",
         "audio_vocab_size": 16384,
-        "motion_vocab_size": 1024,
-        "total_vocab_size": 1024 + 2,
+        "motion_vocab_size": 1024*2,
+        "total_vocab_size": 1024*2 + 2,
         "max_seq_length": 4096,
         "min_seq_length": 128,
         "batch_size": 8,
         "learning_rate": 1e-4,
         "epochs": 1000,
         "sliding_window_step": 32,
-        "pad_token_id": 1024 + 1,
+        "pad_token_id": 1024*2 + 1,
         "interleave_ratio": [1, 1],
     }
     config = SimpleNamespace(**config)
@@ -138,10 +139,10 @@ def audioToken2motionPkl(audio_codes, motion_tokens_gt):
                 # 避免后续 embedding/indexSelect 越界
                 if motion_count % 2 == 0:
                     # body token
-                    next_token = int(next_token % 512)
+                    next_token = int(next_token % 1024)
                 else:
                     # hand token
-                    next_token = int(512 + (next_token % 512))
+                    next_token = int(1024 + (next_token % 1024))
 
                 generated.append(next_token)
                 generated_history.append(next_token)  # 记录生成历史
@@ -165,37 +166,83 @@ def audioToken2motionPkl(audio_codes, motion_tokens_gt):
         return motion_tokens
     
     motion_tokens = generate_for_long_audio(audio_codes.squeeze(0), range(10000), motion_adaptor, device=motion_adaptor.device)
+    if len(motion_tokens) % 2 != 0:
+        motion_tokens = motion_tokens[:-1]
     body_tokens = torch.tensor(motion_tokens[0::2]).unsqueeze(0).to("cuda")
     hand_tokens = torch.tensor(motion_tokens[1::2]).unsqueeze(0).to("cuda")
 
-    decoded = motion_vae.decode((body_tokens, hand_tokens-512))
+    decoded = motion_vae.decode((body_tokens, hand_tokens-1024))
     data_dict_decoded = feats2datapkl(decoded.detach().cpu())
 
     return data_dict_decoded, motion_tokens
 
 
-motion_adaptor = MixedInputGPT2.from_pretrained("output/motion_adaptor_v2/kimi_audio_motion_gpt2_brainco_30_100", device_map="auto")
+# 解析命令行参数
+parser = argparse.ArgumentParser(description='Test GPT2 Motion Adaptor')
+parser.add_argument('--vqvae_config', type=str, default='g1_vqvae_semantic_enhanced.yaml',
+                   help='VQ-VAE config file name')
+parser.add_argument('--vqvae_checkpoint', type=str, default=None,
+                   help='VQ-VAE checkpoint path. If not provided, will use the one in config file')
+parser.add_argument('--audio_path', type=str, default="/root/workspace/HRI_MLLM/test_audio_1.WAV",
+                   help='Input audio file path')
+parser.add_argument('--motion_adaptor_path', type=str, 
+                   default="output/motion_adaptor_v2/kimi_audio_motion_gpt2_brainco_30_100",
+                   help='Motion adaptor model path')
+args = parser.parse_args()
 
-### loading motion VQVAE
+motion_adaptor = MixedInputGPT2.from_pretrained(args.motion_adaptor_path, device_map="auto")
+
+### Loading motion VQ-VAE (Semantic Enhanced)
 def open_yaml(path):
     with open(path, 'r', encoding="utf-8") as file:
         data = yaml.safe_load(file)
-    return data        
-motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "g1_vqvae_full.yaml"))
+    return data
+
+# 加载配置文件
+config_path = os.path.join(ROOT, "model", "motion_encoder", args.vqvae_config)
+print(f"Loading VQ-VAE config from: {config_path}")
+motion_config = open_yaml(config_path)
+
+# 确定checkpoint路径
+if args.vqvae_checkpoint:
+    checkpoint_path = args.vqvae_checkpoint
+elif "ckpt" in motion_config and motion_config["ckpt"]:
+    checkpoint_path = motion_config["ckpt"]
+else:
+    # 使用默认路径
+    if "semantic_enhanced" in args.vqvae_config:
+        checkpoint_path = "output/vqvae_semantic_enhanced/checkpoints/vqvae_final.pt"
+    else:
+        checkpoint_path = "output/vqvae_semantic_training/checkpoints/vqvae_semantic_final.pt"
+    print(f"⚠️  No checkpoint specified in config, using default: {checkpoint_path}")
+
+# 检查checkpoint是否存在
+if not os.path.exists(checkpoint_path):
+    print(f"❌ Checkpoint not found: {checkpoint_path}")
+    print(f"\n可用的checkpoint路径示例:")
+    print(f"  - output/vqvae_semantic_enhanced/checkpoints/vqvae_final.pt")
+    print(f"  - output/vqvae_semantic_training/checkpoints/vqvae_semantic_final.pt")
+    print(f"\n请使用 --vqvae_checkpoint 参数指定正确的路径")
+    exit(1)
+
+print(f"Loading VQ-VAE checkpoint from: {checkpoint_path}")
 motion_vae = VQVaeBodyHand(**motion_config)
-state_dict = torch.load(motion_config["ckpt"], map_location="cpu", weights_only=False)
+state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 motion_vae.load_state_dict(state_dict, strict=True)
 motion_vae.eval()
 motion_vae.to(device="cuda")
+print(f"✅ VQ-VAE model loaded successfully!")
 
 
 
 filename = "2_scott_0_3_3"
 # audio_token_path =  f"{DATA_ROOT}/BEAT_v2_kimi/data/{filename}_audio_tokens.pt"
 # train_data_feature = np.load(f"{DATA_ROOT}/BEAT_v2_kimi/new_joint_vecs/{filename}.npy")
-audio_path = f"{DATA_ROOT}/beat_english_v0.2.1/{filename.split('_')[0]}/{filename}.wav"
+# audio_path = f"{DATA_ROOT}/beat_english_v0.2.1/{filename.split('_')[0]}/{filename}.wav"
 
-audio_path = "/root/workspace/HRI_MLLM/test_audio_1.WAV"
+# 使用命令行指定的音频路径
+audio_path = args.audio_path
+print(f"Using audio file: {audio_path}")
 
 
 # audio_tokens = torch.load(audio_token_path).squeeze(0)
@@ -235,7 +282,7 @@ with open("output.pkl", 'wb') as f:
 # decoded_csv =  load_motion_pkl_as_csv_data("decoded.pkl")
 motion_csv =  load_motion_pkl_as_csv_data("output.pkl")
 
-motion_csv = low_pass_filter(motion_csv)
+# motion_csv = low_pass_filter(motion_csv)
 
 
 # np.savetxt("source.csv", source_csv, delimiter=',', fmt='%.8f')

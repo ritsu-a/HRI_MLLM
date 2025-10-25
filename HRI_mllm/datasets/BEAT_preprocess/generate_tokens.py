@@ -72,6 +72,11 @@ if __name__ == "__main__":
     parser.add_argument("--motion_root", type=str, default="/root/workspace/HRI_MLLM/data/BEAT_v2_kimi/new_joint_vecs")
     parser.add_argument("--save_path", type=str, default="/root/workspace/HRI_MLLM/data/BEAT_v2_kimi")
     parser.add_argument("--model_name_or_path", type=str, default="moonshotai/Kimi-Audio-7B")
+    # VQ-VAE相关参数
+    parser.add_argument("--vqvae_config", type=str, default="g1_vqvae_semantic_enhanced.yaml",
+                       help="VQ-VAE config file name")
+    parser.add_argument("--vqvae_checkpoint", type=str, default=None,
+                       help="VQ-VAE checkpoint path. If not provided, will use the one in config file")
 
 
     args = parser.parse_args()
@@ -94,17 +99,46 @@ if __name__ == "__main__":
     # token2wav = load_token2wav()
 
 
-    ### loading motion VQVAE
+    ### Loading motion VQ-VAE (Semantic Enhanced)
     def open_yaml(path):
         with open(path, 'r', encoding="utf-8") as file:
             data = yaml.safe_load(file)
-        return data        
-    motion_config = open_yaml(os.path.join(ROOT, "model", "motion_encoder", "g1_vqvae_full.yaml"))
+        return data
+    
+    # 加载配置文件
+    config_path = os.path.join(ROOT, "model", "motion_encoder", args.vqvae_config)
+    print(f"Loading VQ-VAE config from: {config_path}")
+    motion_config = open_yaml(config_path)
+    
+    # 确定checkpoint路径
+    if args.vqvae_checkpoint:
+        checkpoint_path = args.vqvae_checkpoint
+    elif "ckpt" in motion_config and motion_config["ckpt"]:
+        checkpoint_path = motion_config["ckpt"]
+    else:
+        # 使用默认路径
+        if "semantic_enhanced" in args.vqvae_config:
+            checkpoint_path = "output/vqvae_semantic_enhanced/checkpoints/vqvae_final.pt"
+        else:
+            checkpoint_path = "output/vqvae_semantic_training/checkpoints/vqvae_semantic_final.pt"
+        print(f"⚠️  No checkpoint specified in config, using default: {checkpoint_path}")
+    
+    # 检查checkpoint是否存在
+    if not os.path.exists(checkpoint_path):
+        print(f"❌ Checkpoint not found: {checkpoint_path}")
+        print(f"\n可用的checkpoint路径示例:")
+        print(f"  - output/vqvae_semantic_enhanced/checkpoints/vqvae_final.pt")
+        print(f"  - output/vqvae_semantic_training/checkpoints/vqvae_semantic_final.pt")
+        print(f"\n请使用 --vqvae_checkpoint 参数指定正确的路径")
+        exit(1)
+    
+    print(f"Loading VQ-VAE checkpoint from: {checkpoint_path}")
     motion_vae = VQVaeBodyHand(**motion_config)
-    state_dict = torch.load(motion_config["ckpt"], map_location="cpu", weights_only=False)
+    state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     motion_vae.load_state_dict(state_dict, strict=True)
     motion_vae.eval()
     motion_vae.to(device="cuda")
+    print(f"✅ VQ-VAE model loaded successfully!")
 
     ### loading kimi audio tokenizer
     if os.path.exists(args.model_name_or_path):

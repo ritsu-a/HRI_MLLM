@@ -1,0 +1,40 @@
+# 保守配置：平衡BEAT和SeG的重建质量
+# 适用场景：希望两个数据集都有较好的表现
+
+quantizer: ema_reset
+epochs: 2000
+lr: 1e-4
+beta: 0.25
+warmup_steps: 1000
+clip_grad_norm: 1.0
+
+# 标准codebook
+code_num: 512
+code_dim: 512
+output_emb_width: 512
+
+# 编码器配置
+down_t: 2
+stride_t: 2
+width: 512
+depth: 3
+dilation_growth_rate: 3
+norm: batch_norm
+activation: gelu
+nfeats: 491
+
+# 温和的语义权重
+semantic_weight: 3.0
+seg_weight: 5.0
+beat_weight: 1.0
+
+# 不使用两阶段训练
+use_two_stage_training: false
+
+# 输出配置
+save_interval: 50
+output_dir: "output/vqvae_semantic_conservative"
+
+# 预训练模型（如果有）
+ckpt: ""
+
