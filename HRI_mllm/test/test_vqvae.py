@@ -109,10 +109,6 @@ if __name__ == "__main__":
     beat_vec_path = "/root/workspace/HRI_MLLM/data/SeG_kimi/new_joint_vecs/THUMB_UP-2.npy"
     train_data_vec = np.load(beat_vec_path)
 
-    beat_vec_path = "/root/workspace/HRI_MLLM/data/BEAT_v2_kimi/new_joint_vecs/1_wayne_0_1_1.npy"
-    beat_filename = beat_vec_path.split("/")[-1]
-    audio_path = os.path.join("/root/workspace/HRI_MLLM/data/BEAT_v2", beat_filename.split("_")[0], beat_filename.replace(".npy", ".wav"))
-
     # 归一化
     print(f"归一化测试数据...")
     mean_t = torch.tensor(test_mean, dtype=torch.float32).to(args.device)
@@ -170,8 +166,8 @@ if __name__ == "__main__":
     np.savetxt("source.csv", source_csv, delimiter=',', fmt='%.8f')
     np.savetxt("decoded.csv", decoded_csv, delimiter=',', fmt='%.8f')
 
-    vis_audio_motion(audio_path, "source.csv", output_path="vqvae_output_source.mp4", robot_type="g1_brainco", rate_limit=False)
-    vis_audio_motion(audio_path, "decoded.csv", output_path="vqvae_output_decoded.mp4", robot_type="g1_brainco", rate_limit=False)
+    vis_audio_motion("source.csv", output_path="vqvae_output_source.mp4", audio_path=None, robot_type="g1_brainco", rate_limit=False)
+    vis_audio_motion("decoded.csv", output_path="vqvae_output_decoded.mp4", audio_path=None, robot_type="g1_brainco", rate_limit=False)
     
     # 横向拼接两个视频
     import subprocess

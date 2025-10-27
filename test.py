@@ -12,4 +12,4 @@ np.savetxt("test1.csv", motion_csv, delimiter=",")
 
 
 
-vis_audio_motion("audio.wav", "test1.csv", output_path="final_output_2.mp4", robot_type="g1_brainco", rate_limit=False)
+vis_audio_motion("test1.csv", output_path="final_output_2.mp4", audio_path="audio.wav", robot_type="g1_brainco", rate_limit=False)

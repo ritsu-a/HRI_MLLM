@@ -58,8 +58,8 @@ if __name__ == "__main__":
     out_llm = "final_output_llm.mp4"
     out_sg = "final_output_sg.mp4"
 
-    vis_audio_motion(audio_path, "llm.csv", output_path=out_llm, robot_type="g1_brainco", rate_limit=False)
-    vis_audio_motion(audio_path, "sg.csv", output_path=out_sg, robot_type="g1_brainco", rate_limit=False, motion_fps=60)
+    vis_audio_motion("llm.csv", output_path=out_llm, audio_path=audio_path, robot_type="g1_brainco", rate_limit=False)
+    vis_audio_motion("sg.csv", output_path=out_sg, audio_path=audio_path, robot_type="g1_brainco", rate_limit=False, motion_fps=60)
 
     # 横向拼接
     out_compare = "final_output_compare.mp4"

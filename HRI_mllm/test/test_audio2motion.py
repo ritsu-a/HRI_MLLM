@@ -246,7 +246,7 @@ import shutil
 shutil.copyfile(audio_path, "audio.wav")
 
 
-vis_audio_motion("audio.wav", "llm.csv", output_path="final_output_llm.mp4", robot_type="g1_brainco", rate_limit=False, motion_fps=25)
-# vis_audio_motion("audio.wav", "decoded.csv", output_path="final_output_decoded.mp4", robot_type="g1_brainco", rate_limit=False)
-# vis_audio_motion("audio.wav", "source.csv", output_path="final_output_source.mp4", robot_type="g1_brainco", rate_limit=False)
+vis_audio_motion("llm.csv", output_path="final_output_llm.mp4", audio_path="audio.wav", robot_type="g1_brainco", rate_limit=False, motion_fps=25)
+# vis_audio_motion("decoded.csv", output_path="final_output_decoded.mp4", audio_path="audio.wav", robot_type="g1_brainco", rate_limit=False)
+# vis_audio_motion("source.csv", output_path="final_output_source.mp4", audio_path="audio.wav", robot_type="g1_brainco", rate_limit=False)
     
