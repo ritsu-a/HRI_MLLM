@@ -14,7 +14,8 @@ from HRI_mllm.model.qwen2_5omni_motion.monkey_patch_generate import monkey_patch
 from HRI_mllm.model.qwen2_5omni.streamers import QwenMotionAdaptorStreamer
 from HRI_mllm import ROOT, DATA_ROOT, OUTPUT_ROOT
 
-from HRI_mllm.utils.motion_utils.g1ml3d import vec_to_data_pkl, feats2datapkl, normalize_vec
+from HRI_mllm.utils.motion_utils.g1ml3d import vec_to_data_pkl, feats2datapkl
+from HRI_mllm.utils.motion_utils.g1ml3d_final import load_normalization_stats
 from HRI_mllm.model.motion_encoder.vqvae import VQVae, VQVAE_Trans
 from HRI_mllm.model.motion_encoder.vqvae_body_hand import VQVaeBodyHand
 
@@ -63,15 +64,15 @@ def audioToken2motionPkl(audio_codes, motion_tokens_gt):
     config={
         "beat_tts_root": "/root/workspace/HRI_MLLM/data/BEAT_v2_kimi",
         "audio_vocab_size": 16384,
-        "motion_vocab_size": 1024*2,
-        "total_vocab_size": 1024*2 + 2,
+        "motion_vocab_size": 512*2,  # 与训练配置一致
+        "total_vocab_size": 512*2 + 2,
         "max_seq_length": 4096,
         "min_seq_length": 128,
         "batch_size": 8,
         "learning_rate": 1e-4,
         "epochs": 1000,
         "sliding_window_step": 32,
-        "pad_token_id": 1024*2 + 1,
+        "pad_token_id": 512*2 + 1,
         "interleave_ratio": [1, 1],
     }
     config = SimpleNamespace(**config)
@@ -137,12 +138,13 @@ def audioToken2motionPkl(audio_codes, motion_tokens_gt):
                 # 将生成的 token 约束到合法的 motion 码本范围：
                 # 偶数次 motion（body）∈ [0, 511]；奇数次 motion（hand）∈ [512, 1023]
                 # 避免后续 embedding/indexSelect 越界
+                code_num = 512
                 if motion_count % 2 == 0:
-                    # body token
-                    next_token = int(next_token % 1024)
+                    # body token [0, 511]
+                    next_token = int(next_token % code_num)
                 else:
-                    # hand token
-                    next_token = int(1024 + (next_token % 1024))
+                    # hand token [512, 1023]
+                    next_token = int(code_num + (next_token % code_num))
 
                 generated.append(next_token)
                 generated_history.append(next_token)  # 记录生成历史
@@ -171,19 +173,24 @@ def audioToken2motionPkl(audio_codes, motion_tokens_gt):
     body_tokens = torch.tensor(motion_tokens[0::2]).unsqueeze(0).to("cuda")
     hand_tokens = torch.tensor(motion_tokens[1::2]).unsqueeze(0).to("cuda")
 
-    decoded = motion_vae.decode((body_tokens, hand_tokens-1024))
-    data_dict_decoded = feats2datapkl(decoded.detach().cpu())
+    # 解码：body tokens直接使用，hand tokens需要减去code_num偏移
+    code_num = 512
+    decoded = motion_vae.decode((body_tokens, hand_tokens - code_num))
+    
+    # 使用与训练时相同的统计量进行反归一化
+    decoded_denorm = decoded * std_t + mean_t
+    data_dict_decoded = feats2datapkl(decoded_denorm)
 
     return data_dict_decoded, motion_tokens
 
 
 # 解析命令行参数
 parser = argparse.ArgumentParser(description='Test GPT2 Motion Adaptor')
-parser.add_argument('--vqvae_config', type=str, default='g1_vqvae_semantic_enhanced.yaml',
+parser.add_argument('--vqvae_config', type=str, default='g1_vqvae_arbitrary_length_balanced.yaml',
                    help='VQ-VAE config file name')
 parser.add_argument('--vqvae_checkpoint', type=str, default=None,
                    help='VQ-VAE checkpoint path. If not provided, will use the one in config file')
-parser.add_argument('--audio_path', type=str, default="/root/workspace/HRI_MLLM/test_audio_1.WAV",
+parser.add_argument('--audio_path', type=str, default="/root/workspace/HRI_MLLM/data/beat_english_v0.2.1/1/1_wayne_0_1_1_qwen1.wav",
                    help='Input audio file path')
 parser.add_argument('--motion_adaptor_path', type=str, 
                    default="output/motion_adaptor_v2/kimi_audio_motion_gpt2_brainco_30_100",
@@ -209,23 +216,26 @@ if args.vqvae_checkpoint:
 elif "ckpt" in motion_config and motion_config["ckpt"]:
     checkpoint_path = motion_config["ckpt"]
 else:
-    # 使用默认路径
-    if "semantic_enhanced" in args.vqvae_config:
-        checkpoint_path = "output/vqvae_semantic_enhanced/checkpoints/vqvae_final.pt"
-    else:
-        checkpoint_path = "output/vqvae_semantic_training/checkpoints/vqvae_semantic_final.pt"
+    checkpoint_path = "output/vqvae_arbitrary_length_balanced/checkpoints/vqvae_final.pt"
     print(f"⚠️  No checkpoint specified in config, using default: {checkpoint_path}")
 
 # 检查checkpoint是否存在
 if not os.path.exists(checkpoint_path):
     print(f"❌ Checkpoint not found: {checkpoint_path}")
     print(f"\n可用的checkpoint路径示例:")
-    print(f"  - output/vqvae_semantic_enhanced/checkpoints/vqvae_final.pt")
-    print(f"  - output/vqvae_semantic_training/checkpoints/vqvae_semantic_final.pt")
+    print(f"  - output/vqvae_arbitrary_length_balanced/checkpoints/vqvae_final.pt")
     print(f"\n请使用 --vqvae_checkpoint 参数指定正确的路径")
     exit(1)
 
 print(f"Loading VQ-VAE checkpoint from: {checkpoint_path}")
+
+# 加载归一化统计量（与训练时保持一致）
+test_mean, test_std = load_normalization_stats(motion_config)
+mean_t = torch.tensor(test_mean, dtype=torch.float32).to("cuda")
+std_t = torch.tensor(test_std, dtype=torch.float32).to("cuda")
+print(f"✅ Loaded normalization stats: Mean {test_mean.shape}, Std {test_std.shape}")
+
+# 加载模型
 motion_vae = VQVaeBodyHand(**motion_config)
 state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 motion_vae.load_state_dict(state_dict, strict=True)

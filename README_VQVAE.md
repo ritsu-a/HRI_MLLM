@@ -3,7 +3,8 @@
 ## 📁 核心文件（已清理，只保留最佳版本）
 
 ### 配置文件
-- `HRI_mllm/model/motion_encoder/g1_vqvae_final.yaml` - 最终优化配置
+- `HRI_mllm/model/motion_encoder/g1_vqvae_final.yaml` - 最终优化配置（固定32帧窗口）
+- `HRI_mllm/model/motion_encoder/g1_vqvae_arbitrary_length.yaml` - 🆕 任意长度训练配置
 
 ### 训练
 - `HRI_mllm/train/train_vqvae_final.py` - 最终训练脚本
@@ -22,30 +23,44 @@
 ## 🚀 快速开始
 
 ### 训练
-\`\`\`bash
-VQVAE_CONFIG="g1_vqvae_final.yaml" \\
-  torchrun --nproc_per_node=8 \\
-  HRI_mllm/train/train_vqvae_final.py
-\`\`\`
 
-**🔧 训练配置：固定32帧窗口**
-- 默认关闭 `use_variable_length: false`
-- 使用固定32帧窗口（稳定可靠）
-- 变长训练有mask loss bug（暂不推荐）
-- 测试时需按32帧窗口切分
+#### 1. 固定32帧窗口训练（稳定推荐）
+```bash
+VQVAE_CONFIG="g1_vqvae_final.yaml" \
+  torchrun --nproc_per_node=8 \
+  HRI_mllm/train/train_vqvae_final.py
+```
+
+#### 2. 🆕 任意长度训练（实验性）
+```bash
+VQVAE_CONFIG="g1_vqvae_arbitrary_length.yaml" \
+  torchrun --nproc_per_node=8 \
+  HRI_mllm/train/train_vqvae_final.py
+```
+
+**训练模式对比**：
+- **固定32帧窗口**：稳定可靠，推荐用于生产环境
+- **任意长度训练**：支持任意长度序列，但内存消耗更大，实验性功能
 
 ### 测试
-\`\`\`bash
-python HRI_mllm/test/test_vqvae.py \\
-  --config g1_vqvae_final.yaml \\
-  --checkpoint output/vqvae_final/checkpoints/vqvae_final.pt
-\`\`\`
 
-**窗口测试**：
-- ✅ 按32帧窗口切分（与训练一致）
-- ✅ 自动拼接生成完整序列
-- ✅ 详细的每窗口性能统计
-- ⚠️  窗口边界可能有轻微跳变
+#### 1. 固定32帧窗口测试
+```bash
+python HRI_mllm/test/test_vqvae.py \
+  --config g1_vqvae_final.yaml \
+  --checkpoint output/vqvae_final/checkpoints/vqvae_final.pt
+```
+
+#### 2. 🆕 任意长度测试
+```bash
+python HRI_mllm/test/test_vqvae.py \
+  --config g1_vqvae_arbitrary_length.yaml \
+  --checkpoint output/vqvae_arbitrary_length/checkpoints/vqvae_final.pt
+```
+
+**测试模式对比**：
+- **固定32帧窗口**：按窗口切分测试，与训练一致
+- **任意长度测试**：直接处理完整序列，无需窗口切分
 
 ---
 

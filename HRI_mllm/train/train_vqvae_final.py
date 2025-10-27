@@ -22,6 +22,7 @@ from HRI_mllm.model.motion_encoder.vqvae import VQVae
 from HRI_mllm.model.motion_encoder.vqvae_body_hand import VQVaeBodyHand
 from HRI_mllm.datasets.G1ML3D import G1ML3DDataModule
 from HRI_mllm.datasets.MixedMotionDatasetVQ import MixedMotionDatasetVQ
+from HRI_mllm.datasets.MixedMotionDatasetVQGrouped import MixedMotionDatasetVQGrouped, GroupedBatchSampler
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
@@ -46,10 +47,34 @@ def is_main_process():
 
 def collate_fn(batch):
     """
-    原始collate函数：固定窗口大小
+    原始collate函数：固定窗口大小或变长窗口（支持padding）
     """
-    motions = torch.stack([torch.from_numpy(item[1]).float() for item in batch])
-    dataset_indices = torch.tensor([item[6] for item in batch], dtype=torch.long)
+    motions_list = []
+    dataset_indices = []
+    
+    for item in batch:
+        motion = torch.from_numpy(item[1]).float()  # [T, F]
+        dataset_idx = item[6]
+        motions_list.append(motion)
+        dataset_indices.append(dataset_idx)
+    
+    # Padding到batch内最大长度
+    max_len_in_batch = max(m.shape[0] for m in motions_list)
+    padded_motions = []
+    
+    for motion in motions_list:
+        if motion.shape[0] < max_len_in_batch:
+            # 用0 padding
+            padding = torch.zeros(max_len_in_batch - motion.shape[0], motion.shape[1])
+            padded_motion = torch.cat([motion, padding], dim=0)
+        else:
+            padded_motion = motion
+        
+        padded_motions.append(padded_motion)
+    
+    motions = torch.stack(padded_motions)
+    dataset_indices = torch.tensor(dataset_indices, dtype=torch.long)
+    
     if motions.isnan().any():
         print("Found NaN in motion data")
         import ipdb;ipdb.set_trace()
@@ -57,7 +82,7 @@ def collate_fn(batch):
 
 def collate_fn_variable_length(batch, min_length=32, max_length=128):
     """
-    🔧 新增：支持变长窗口的collate函数
+    🔧 支持变长窗口的collate函数
     从每个样本中随机截取不同长度的窗口，让模型学习处理多种序列长度
     
     Args:
@@ -120,9 +145,75 @@ def collate_fn_variable_length(batch, min_length=32, max_length=128):
         import ipdb;ipdb.set_trace()
     
     return motions, dataset_indices, masks
+
+
+def collate_fn_arbitrary_length(batch, max_length=512, min_length=8):
+    """
+    🆕 支持任意长度动作序列的collate函数
+    保持原始序列长度，只进行必要的padding
+    
+    Args:
+        batch: 数据批次
+        max_length: 最大允许长度（防止内存溢出）
+        min_length: 最小允许长度（确保卷积层正常工作）
+    """
+    motions_list = []
+    dataset_indices = []
+    original_lengths = []
+    
+    for item in batch:
+        motion = torch.from_numpy(item[1]).float()  # [T, F]
+        dataset_idx = item[6]
+        original_length = motion.shape[0]
+        
+        # 如果序列太短，padding到最小长度
+        if motion.shape[0] < min_length:
+            padding = torch.zeros(min_length - motion.shape[0], motion.shape[1])
+            motion = torch.cat([motion, padding], dim=0)
+            original_length = min_length
+        
+        # 如果序列太长，截断到最大长度
+        if motion.shape[0] > max_length:
+            motion = motion[:max_length]
+            original_length = max_length
+        
+        motions_list.append(motion)
+        dataset_indices.append(dataset_idx)
+        original_lengths.append(original_length)
+    
+    # Padding到batch内最大长度
+    max_len_in_batch = max(m.shape[0] for m in motions_list)
+    padded_motions = []
+    masks = []
+    
+    for i, motion in enumerate(motions_list):
+        if motion.shape[0] < max_len_in_batch:
+            # 用0 padding
+            padding = torch.zeros(max_len_in_batch - motion.shape[0], motion.shape[1])
+            padded_motion = torch.cat([motion, padding], dim=0)
+            mask = torch.cat([torch.ones(motion.shape[0]), torch.zeros(max_len_in_batch - motion.shape[0])])
+        else:
+            padded_motion = motion
+            mask = torch.ones(motion.shape[0])
+        
+        padded_motions.append(padded_motion)
+        masks.append(mask)
+    
+    motions = torch.stack(padded_motions)
+    masks = torch.stack(masks)
+    dataset_indices = torch.tensor(dataset_indices, dtype=torch.long)
+    original_lengths = torch.tensor(original_lengths, dtype=torch.long)
+    
+    if motions.isnan().any():
+        print("Found NaN in motion data")
+        import ipdb;ipdb.set_trace()
+    
+    return motions, dataset_indices, masks, original_lengths
     
 def load_dataset(use_seg_only=False, seg_weight=10.0, beat_weight=1.0, internet_weight=1.0, 
-                 use_mixed_stats=True, use_variable_length=False, min_length=32, max_length=128):
+                 use_mixed_stats=True, use_variable_length=False, min_length=32, max_length=128,
+                 use_arbitrary_length=False, max_arbitrary_length=512, min_arbitrary_length=8,
+                 use_grouped_batches=False):
     """
     加载数据集
     Args:
@@ -130,6 +221,9 @@ def load_dataset(use_seg_only=False, seg_weight=10.0, beat_weight=1.0, internet_
         use_variable_length: 是否使用变长窗口训练（推荐True，提高泛化能力）
         min_length: 变长窗口最小长度
         max_length: 变长窗口最大长度
+        use_arbitrary_length: 是否使用任意长度序列（保持原始长度）
+        max_arbitrary_length: 任意长度模式下的最大允许长度
+        min_arbitrary_length: 任意长度模式下的最小允许长度（确保卷积层正常工作）
     """
     if use_seg_only:
         data_root_list = [os.path.join(DATA_ROOT, "SeG_kimi")]
@@ -169,23 +263,67 @@ def load_dataset(use_seg_only=False, seg_weight=10.0, beat_weight=1.0, internet_
     mean = np.load(os.path.join(mean_std_root, "Mean.npy"))
     std = np.load(os.path.join(mean_std_root, "Std.npy"))
     
-    train_dataset = MixedMotionDatasetVQ(
-        data_root_list=data_root_list,
-        split="train",
-        mean=mean,
-        std=std,
-        max_motion_length=196,
-        min_motion_length=32,
-        win_size=32,
-        unit_length=4,
-        fps=20,
-        tmpFile=True,
-        tiny=False,
-        debug=False,
-        dataset_weights=dataset_weights,
-        nfeats=491,
-        dataset_name="Mixed_BEAT_v2_kimi_internet_data_SeG_kimi" if not use_seg_only else "SeG_kimi_only"
-    )
+    # 🔧 根据训练模式调整数据集参数
+    if use_arbitrary_length:
+        # 任意长度模式：不限制窗口大小，保持原始长度
+        win_size = 1  # 最小窗口，实际会被collate函数处理
+        max_motion_length = max_arbitrary_length
+        min_motion_length = min_arbitrary_length
+        dataset_window_sizes = None  # 不使用特定窗口大小
+    elif use_variable_length:
+        # 变长窗口模式：使用最大窗口大小
+        win_size = max_length
+        max_motion_length = max_length
+        min_motion_length = min_length
+        dataset_window_sizes = None  # 不使用特定窗口大小
+    else:
+        # 固定窗口模式：不同数据集使用不同窗口大小
+        # BEAT(0): 256帧，internet(1): 256帧，SeG(2): 64帧
+        win_size = 256  # 默认窗口大小
+        max_motion_length = 300
+        min_motion_length = 256
+        dataset_window_sizes = [256, 256, 64]  # 🔧 为SeG使用更短的64帧窗口
+    
+    # 🔧 选择数据集类
+    if use_grouped_batches:
+        # 使用分组数据集
+        train_dataset = MixedMotionDatasetVQGrouped(
+            data_root_list=data_root_list,
+            split="train",
+            mean=mean,
+            std=std,
+            max_motion_length=max_motion_length,
+            min_motion_length=min_motion_length,
+            win_size=win_size,
+            unit_length=4,
+            fps=20,
+            tmpFile=True,
+            tiny=False,
+            debug=False,
+            dataset_weights=dataset_weights,
+            nfeats=491,
+            dataset_window_sizes=dataset_window_sizes,  # 🔧 传递每个数据集的窗口大小
+            dataset_name="Mixed_BEAT_v2_kimi_internet_data_SeG_kimi" if not use_seg_only else "SeG_kimi_only"
+        )
+    else:
+        # 使用标准混合数据集
+        train_dataset = MixedMotionDatasetVQ(
+            data_root_list=data_root_list,
+            split="train",
+            mean=mean,
+            std=std,
+            max_motion_length=max_motion_length,
+            min_motion_length=min_motion_length,
+            win_size=win_size,
+            unit_length=4,
+            fps=20,
+            tmpFile=True,
+            tiny=False,
+            debug=False,
+            dataset_weights=dataset_weights,
+            nfeats=491,
+            dataset_name="Mixed_BEAT_v2_kimi_internet_data_SeG_kimi" if not use_seg_only else "SeG_kimi_only"
+        )
     
     if is_dist_avail_and_initialized():
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, shuffle=True)
@@ -193,23 +331,52 @@ def load_dataset(use_seg_only=False, seg_weight=10.0, beat_weight=1.0, internet_
         train_sampler = None
 
     # 🔧 选择collate函数
-    if use_variable_length:
-        # 使用lambda包装带参数的collate_fn
+    if use_arbitrary_length:
+        # 任意长度模式：保持原始序列长度
+        collate_func = lambda batch: collate_fn_arbitrary_length(batch, max_arbitrary_length, min_arbitrary_length)
+        if is_main_process():
+            print(f"✅ 使用任意长度训练: 最小 {min_arbitrary_length} 帧，最大 {max_arbitrary_length} 帧")
+    elif use_variable_length:
+        # 变长窗口模式：随机选择窗口长度
         collate_func = lambda batch: collate_fn_variable_length(batch, min_length, max_length)
         if is_main_process():
             print(f"✅ 使用变长窗口训练: [{min_length}, {max_length}] 帧")
     else:
+        # 固定窗口模式：256帧窗口
         collate_func = collate_fn
         if is_main_process():
-            print(f"ℹ️  使用固定窗口训练: 32 帧")
+            print(f"ℹ️  使用固定窗口训练: 256 帧")
 
-    train_loader = DataLoader(train_dataset,
-                              batch_size=32,
-                              shuffle=(train_sampler is None),
-                              sampler=train_sampler,
-                              num_workers=4,
-                              pin_memory=True,
-                              collate_fn=collate_func)
+    # 🔧 如果使用分组批次，需要特殊的sampler
+    if use_grouped_batches and train_sampler is None:
+        # 创建分组批次采样器
+        grouped_sampler = GroupedBatchSampler(
+            dataset=train_dataset,
+            batch_size=32,
+            dataset_weights=dataset_weights,
+            num_batches_per_epoch=None  # 自动计算
+        )
+        
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=grouped_sampler,
+            num_workers=4,
+            pin_memory=True,
+            collate_fn=collate_func
+        )
+        if is_main_process():
+            print(f"✅ 使用分组批次采样器（按数据集分组）")
+    else:
+        # 标准DataLoader
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=32,
+            shuffle=(train_sampler is None),
+            sampler=train_sampler,
+            num_workers=4,
+            pin_memory=True,
+            collate_fn=collate_func
+        )
     
     return train_loader, mean, std
 
@@ -426,6 +593,14 @@ def compute_loss_with_amplitude(features, x_out, quant_loss, config, mean=None, 
     Args:
         mask: 可选的mask张量 [B, T]，1表示有效帧，0表示padding
     """
+    # 🔧 修复长度不匹配问题：取最小长度
+    min_length = min(features.shape[1], x_out.shape[1])
+    if features.shape[1] != x_out.shape[1]:
+        features = features[:, :min_length, :]
+        x_out = x_out[:, :min_length, :]
+        if mask is not None:
+            mask = mask[:, :min_length]
+    
     # 1. 基础重建损失
     recon_loss_per_sample = F.mse_loss(x_out, features, reduction='none')  # [B, T, F]
     
@@ -595,11 +770,17 @@ def train_vqvae(config, train_loader=None):
                 wandb.log({"training_stage": 2, "epoch": epoch})
         
         # 加载数据集
-        use_seg_only = (current_stage == 1)
+        # 🔧 如果使用256帧固定窗口，强制使用混合数据（不分阶段）
+        # 因为SeG数据序列太短，无法满足256帧窗口要求
+        use_seg_only = (current_stage == 1) and (not int(config.get("max_window_length", 256)) >= 256)
         use_mixed_stats = config.get("use_mixed_stats", True)
         use_variable_length = config.get("use_variable_length", False)
+        use_arbitrary_length = config.get("use_arbitrary_length", False)
         min_length = int(config.get("min_window_length", 32))
         max_length = int(config.get("max_window_length", 128))
+        max_arbitrary_length = int(config.get("max_arbitrary_length", 512))
+        min_arbitrary_length = int(config.get("min_arbitrary_length", 8))
+        use_grouped_batches = config.get("use_grouped_batches", False)  # 🔧 新增：分组批次
         
         if current_train_loader is None or (use_two_stage and epoch == stage1_epochs):
             current_train_loader, _, _ = load_dataset(
@@ -610,12 +791,22 @@ def train_vqvae(config, train_loader=None):
                 use_mixed_stats=use_mixed_stats,
                 use_variable_length=use_variable_length,
                 min_length=min_length,
-                max_length=max_length
+                max_length=max_length,
+                use_arbitrary_length=use_arbitrary_length,
+                max_arbitrary_length=max_arbitrary_length,
+                min_arbitrary_length=min_arbitrary_length,
+                use_grouped_batches=use_grouped_batches
             )
         
         total_loss = 0.0
         total_perplexity = 0.0
         epoch_stats = {}
+        
+        # 🔧 检查训练集是否为空
+        if len(current_train_loader) == 0:
+            if is_main_process():
+                print(f"⚠️  Warning: Train loader is empty for epoch {epoch}. Skipping this epoch.")
+            continue
         
         # 分布式sampler设置
         if hasattr(current_train_loader, 'sampler') and isinstance(current_train_loader.sampler, torch.utils.data.distributed.DistributedSampler):
@@ -623,18 +814,27 @@ def train_vqvae(config, train_loader=None):
             
         for batch_idx, batch_data in enumerate(current_train_loader):
             # 🔧 处理不同collate_fn的返回值
-            if len(batch_data) == 3:
+            if len(batch_data) == 4:
+                # 任意长度模式：(motions, dataset_indices, masks, original_lengths)
+                motions, dataset_indices, masks, original_lengths = batch_data
+                motions = motions.to(device, non_blocking=True)
+                dataset_indices = dataset_indices.to(device, non_blocking=True)
+                masks = masks.to(device, non_blocking=True)
+                original_lengths = original_lengths.to(device, non_blocking=True)
+            elif len(batch_data) == 3:
                 # 变长窗口模式：(motions, dataset_indices, masks)
                 motions, dataset_indices, masks = batch_data
                 motions = motions.to(device, non_blocking=True)
                 dataset_indices = dataset_indices.to(device, non_blocking=True)
                 masks = masks.to(device, non_blocking=True)
+                original_lengths = None
             else:
                 # 固定窗口模式：(motions, dataset_indices)
                 motions, dataset_indices = batch_data
                 motions = motions.to(device, non_blocking=True)
                 dataset_indices = dataset_indices.to(device, non_blocking=True)
                 masks = None
+                original_lengths = None
             
             # 前向传播
             x_out, quant_loss, perplexity = motion_vae(motions)
@@ -714,8 +914,9 @@ def train_vqvae(config, train_loader=None):
                               f"Hand Amp: {batch_stats.get('hand_std_ratio', 0):.4f}")
         
         # Epoch统计
-        avg_loss = total_loss / len(current_train_loader)
-        avg_perplexity = total_perplexity / len(current_train_loader)
+        num_batches = max(len(current_train_loader), 1)  # 防止除零
+        avg_loss = total_loss / num_batches
+        avg_perplexity = total_perplexity / num_batches
         
         # 计算平均幅度比例
         avg_amplitude_ratio = 0.0

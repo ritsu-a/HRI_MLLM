@@ -45,6 +45,10 @@ Generate tokens for dataset:
 Train motion adaptor:
     generate motion tokens first:
         python HRI_mllm/datasets/BEAT_preprocess/generate_motion_tokens.py
+
+
+        python HRI_mllm/datasets/BEAT_preprocess/generate_motion_tokens.py   --vqvae_config g1_vqvae_final.yaml   --data_dirs BEAT_v2_kimi internet_data_v1_kimi 1025_60_60fps_kimi
+        
         python HRI_mllm/datasets/BEAT_preprocess/create_jsonl.py
 
     then 

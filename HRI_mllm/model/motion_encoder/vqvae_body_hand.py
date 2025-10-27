@@ -1,8 +1,10 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 import copy
+from typing import Tuple, Optional, Union
 
 
 from .vqvae import VQVae
@@ -77,3 +79,5 @@ class VQVaeBodyHand(nn.Module):
         x_recon = torch.cat([body_recon,hand_recon], dim=-1)  # (B, T, 491)
         total_quant_loss = body_quant_loss + hand_quant_loss
         return x_recon, total_quant_loss, (body_perplexity + hand_perplexity) / 2
+    
+    

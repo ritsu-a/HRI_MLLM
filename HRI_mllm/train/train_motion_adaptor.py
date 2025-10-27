@@ -1,15 +1,120 @@
 import torch
 import torch.distributed as dist
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, ConcatDataset, Subset
 from torch.utils.data.distributed import DistributedSampler
 from transformers import GPT2Config, GPT2LMHeadModel
 import numpy as np
 import os
 import wandb
 import math
+import json
 from tqdm import tqdm
 from HRI_mllm.datasets.BEATAudioMotionDataset import BEATAudioMotionDataset
 from HRI_mllm.model.gpt2_adaptor.model import MixedInputGPT2
+
+class JSONLAudioMotionDataset(Dataset):
+    """从JSONL文件加载音频-动作数据的Dataset"""
+    
+    def __init__(self, jsonl_path, config):
+        self.config = config
+        self.jsonl_path = jsonl_path
+        self.samples = []
+        self.stats = {'total_sequences': 0, 'generated_samples': 0, 'max_length': 0}
+        self.interleave_audios, self.interleave_motions = config.interleave_ratio
+        self.SEQ_PAD_TOKEN = config.pad_token_id
+        
+        print(f"Loading JSONL file: {jsonl_path}")
+        
+        # 读取JSONL文件
+        with open(jsonl_path, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f):
+                try:
+                    data = json.loads(line.strip())
+                    
+                    # 从conversation中提取audio和motion tokens
+                    audio_tokens = None
+                    motion_tokens = None
+                    
+                    for msg in data['conversation']:
+                        if msg.get('message_type') == 'audio' and 'audio_tokens' in msg:
+                            audio_tokens = msg['audio_tokens']
+                        elif msg.get('message_type') == 'audio_motion' and 'motion_tokens' in msg:
+                            motion_tokens = msg['motion_tokens']
+                    
+                    if audio_tokens is None or motion_tokens is None:
+                        continue
+                    
+                    # 转换为torch tensor
+                    if not isinstance(audio_tokens, torch.Tensor):
+                        audio_tokens = torch.tensor(audio_tokens)
+                    if not isinstance(motion_tokens, torch.Tensor):
+                        motion_tokens = torch.tensor(motion_tokens)
+                    
+                    # 构建完整序列
+                    full_sequence = []
+                    token_types = []
+                    
+                    for i in range(len(audio_tokens)):
+                        full_sequence.append(audio_tokens[i].item())
+                        token_types.append(0)
+                        
+                        if (i + 1) % self.interleave_audios == 0:
+                            motion_idx = i // self.interleave_audios * self.interleave_motions
+                            for j in range(self.interleave_motions):
+                                if motion_idx + j < len(motion_tokens):
+                                    full_sequence.append(motion_tokens[motion_idx + j].item())
+                                    token_types.append(1)
+                    
+                    # 应用滑动窗口
+                    self.apply_sliding_window(full_sequence, token_types)
+                    self.stats['total_sequences'] += 1
+                    
+                except Exception as e:
+                    print(f"Error processing line {line_num} in {jsonl_path}: {e}")
+                    continue
+        
+        print(f"Loaded {len(self.samples)} samples from {jsonl_path}")
+    
+    def apply_sliding_window(self, full_seq, token_types):
+        seq_len = len(full_seq)
+        
+        if seq_len > self.config.max_seq_length:
+            return
+        
+        sub_seq = full_seq
+        sub_types = token_types
+        
+        mask = [1 if t == 1 else 0 for t in sub_types]
+        
+        padded_seq = sub_seq + [self.SEQ_PAD_TOKEN] * (self.config.max_seq_length - len(sub_seq))
+        padded_mask = mask + [0] * (self.config.max_seq_length - len(mask))
+        
+        self.samples.append({
+            'tokens': torch.tensor(padded_seq),
+            'mask': torch.tensor(padded_mask),
+            'seq_length': len(sub_seq)
+        })
+        
+        self.stats['generated_samples'] += 1
+        self.stats['max_length'] = max(self.stats['max_length'], len(sub_seq))
+    
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        return self.samples[idx]
+
+import argparse
+
+# 解析命令行参数
+parser = argparse.ArgumentParser(description='Train Motion Adaptor')
+parser.add_argument('--resume_from', type=str, default=None,
+                   help='Checkpoint path to resume from (e.g., output/motion_adaptor_v2/kimi_audio_motion_gpt2_brainco_30_100/checkpoints/epoch_300.pt)')
+parser.add_argument('--datasets', type=str, nargs='+', default=None,
+                   help='Specific datasets to use (e.g., BEAT or internet) - default: all')
+parser.add_argument('--epochs', type=int, default=300,
+                   help='Number of epochs to train')
+args = parser.parse_args()
 
 exp_name = "kimi_audio_motion_gpt2_brainco_30_100"
 os.makedirs(os.path.join("output/motion_adaptor_v2", exp_name), exist_ok=True)
@@ -25,47 +130,78 @@ def setup_distributed():
     torch.cuda.set_device(local_rank)
     return local_rank, world_size
 
-# 获取全局rank
-local_rank, world_size = setup_distributed()
+# 检查是否在分布式环境中运行
+if 'RANK' in os.environ:
+    local_rank, world_size = setup_distributed()
+else:
+    # 单机模式
+    local_rank, world_size = 0, 1
+    torch.cuda.set_device(0)
 
+# JSONL文件路径 - 每个数据集独立的jsonl文件
+all_jsonl_files = {
+    "BEAT": "/root/workspace/HRI_MLLM/data/BEAT_v2_kimi_tokens.jsonl",
+    "internet": "/root/workspace/HRI_MLLM/data/internet_data_v1_kimi_tokens.jsonl"
+}
+
+# 根据命令行参数选择数据集
+if args.datasets:
+    jsonl_files = [all_jsonl_files[ds] for ds in args.datasets if ds in all_jsonl_files]
+    if not jsonl_files:
+        if local_rank == 0:
+            print(f"❌ No valid datasets found from: {args.datasets}")
+            print(f"Available datasets: {list(all_jsonl_files.keys())}")
+        exit(1)
+else:
+    jsonl_files = list(all_jsonl_files.values())
+
+if local_rank == 0:
+    print(f"Using datasets: {args.datasets if args.datasets else 'all'}")
+    print(f"JSONL files: {jsonl_files}")
+    
+# 检查文件是否存在
+for jsonl_file in jsonl_files:
+    if not os.path.exists(jsonl_file):
+        if local_rank == 0:
+            print(f"❌ JSONL file not found: {jsonl_file}")
+        exit(1)
 
 # 只在主进程初始化Weights & Biases
 if local_rank == 0:
     wandb.init(
         project="audio-motion-BEAT-gpt2-adaptor",
         config={
-            "beat_tts_root": "/root/workspace/HRI_MLLM/data/BEAT_v2_kimi",
+            "jsonl_files": jsonl_files,
             "audio_vocab_size": 16384,
-            "motion_vocab_size": 1024*2,
-            "total_vocab_size": 1024*2 + 2,
+            "motion_vocab_size": 512*2,
+            "total_vocab_size": 512*2 + 2,
             "max_seq_length": 4096,
             "min_seq_length": 128,
             "batch_size": 8,
             "learning_rate": 1e-4,
-            "epochs": 500,
+            "epochs": args.epochs,  # 使用命令行参数
             "sliding_window_step": 32,
-            "pad_token_id": 1024*2 + 1,
+            "pad_token_id": 512*2 + 1,
             "interleave_ratio": [1, 1],
             "exp_name": exp_name,
         }
     )
     config = wandb.config
 else:
-    # 非主进程使用相同的配置
     config = type('Config', (), {
-        "beat_tts_root": "/root/workspace/HRI_MLLM/data/BEAT_v2_kimi",
+        "jsonl_files": jsonl_files,
         "audio_vocab_size": 16384,
-        "motion_vocab_size": 1024*2,
-        "total_vocab_size": 1024*2 + 2,
+        "motion_vocab_size": 512*2,
+        "total_vocab_size": 512*2 + 2,
         "max_seq_length": 4096,
         "min_seq_length": 128,
         "batch_size": 8,
         "learning_rate": 1e-4,
-        "epochs": 500,
+        "epochs": args.epochs,  # 使用命令行参数
         "sliding_window_step": 32,
-        "pad_token_id": 1024*2 + 1,
+        "pad_token_id": 512*2 + 1,
         "interleave_ratio": [1, 1],
-        "exp_name":exp_name,
+        "exp_name": exp_name,
     })()
 
 # 创建模型
@@ -81,43 +217,128 @@ model_config = GPT2Config(
     attn_pdrop=0.1,
 )
 model = MixedInputGPT2(model_config)
-# model = MixedInputGPT2.from_pretrained("output/motion_adaptor_v1/kimi_audio_motion_gpt2_v5", device_map="auto")
 
-# 将模型移到当前GPU
 device = torch.device(f'cuda:{local_rank}')
 model.to(device)
 
-# 使用DistributedDataParallel包装模型
-model = torch.nn.parallel.DistributedDataParallel(
-    model, 
-    device_ids=[local_rank],
-    output_device=local_rank,
-    find_unused_parameters=True  # 改为False以消除警告
-)
+# 如果提供了resume_from，加载checkpoint
+start_epoch = 0
+if args.resume_from and os.path.exists(args.resume_from):
+    if local_rank == 0:
+        print(f"\n{'='*80}")
+        print(f"🔄 Resuming from checkpoint: {args.resume_from}")
+        print(f"{'='*80}")
+    
+    checkpoint = torch.load(args.resume_from, map_location='cpu')
+    model.load_state_dict(checkpoint['model_state'])
+    start_epoch = checkpoint.get('epoch', 0) + 1
+    
+    # 检查是否需要调整epochs
+    checkpoint_epoch = checkpoint.get('epoch', 0)
+    if local_rank == 0:
+        print(f"✅ Loaded checkpoint from epoch {checkpoint_epoch}")
+        print(f"   Resuming from epoch {start_epoch}")
+        print(f"   Total epochs requested: {args.epochs}")
+        if start_epoch >= args.epochs:
+            print(f"⚠️  WARNING: Checkpoint epoch ({checkpoint_epoch}) >= total epochs ({args.epochs})")
+            print(f"   Training will start but may complete immediately")
+        print(f"{'='*80}\n")
+else:
+    if local_rank == 0:
+        print("\nStarting training from scratch\n")
 
-# 只在主进程记录模型
+# 只在分布式模式下使用DDP
+if world_size > 1:
+    model = torch.nn.parallel.DistributedDataParallel(
+        model, 
+        device_ids=[local_rank],
+        output_device=local_rank,
+        find_unused_parameters=True
+    )
+
 if local_rank == 0:
-    wandb.watch(model.module, log="parameters", log_freq=100)
+    # 在DDP模式下使用model.module，否则直接使用model
+    model_to_watch = model.module if world_size > 1 else model
+    wandb.watch(model_to_watch, log="parameters", log_freq=100)
 
-# 创建数据集
-dataset = BEATAudioMotionDataset(config)
+# 创建多个数据集并平衡采样
+datasets_info = []
+for jsonl_path in config.jsonl_files:
+    if os.path.exists(jsonl_path):
+        dataset = JSONLAudioMotionDataset(jsonl_path, config)
+        datasets_info.append((dataset, jsonl_path))
+        if local_rank == 0:
+            print(f"Loaded {len(dataset)} samples from {jsonl_path}")
+    else:
+        print(f"Warning: {jsonl_path} not found, skipping...")
+
+if len(datasets_info) == 0:
+    if local_rank == 0:
+        print("❌ No valid JSONL files found!")
+        print(f"Searched files: {jsonl_files}")
+    exit(1)
+
+# 如果只有1个数据集，直接使用
+if len(datasets_info) == 1:
+    dataset = datasets_info[0][0]
+else:
+    # 对于多个数据集，找到最小的数据集大小
+    min_size = min(len(d) for d, _ in datasets_info)
+    
+    if local_rank == 0:
+        print(f"Balancing datasets to {min_size} samples each")
+    
+    # 为每个数据集创建加权随机采样子集
+    balanced_datasets = []
+    for dataset, jsonl_path in datasets_info:
+        if len(dataset) > min_size:
+            # 创建加权采样索引
+            indices = list(range(len(dataset)))
+            # 使用加权随机采样，保持原始分布
+            selected_indices = torch.multinomial(
+                torch.ones(len(dataset)), 
+                min_size, 
+                replacement=True
+            ).tolist()
+            
+            # 创建子集
+            subset = Subset(dataset, selected_indices)
+            balanced_datasets.append(subset)
+            
+            if local_rank == 0:
+                print(f"  {jsonl_path}: {len(dataset)} -> {len(subset)} samples")
+        else:
+            balanced_datasets.append(dataset)
+            if local_rank == 0:
+                print(f"  {jsonl_path}: {len(dataset)} samples (no sampling needed)")
+    
+    # 合并平衡后的数据集
+    dataset = ConcatDataset(balanced_datasets)
+
 if local_rank == 0:
-    dataset.print_stats()
+    if isinstance(dataset, ConcatDataset):
+        total_samples = len(dataset)
+        print(f"Total samples: {total_samples} (balanced from {len(datasets_info)} files)")
+    else:
+        total_samples = len(dataset)
+        print(f"Total samples: {total_samples}")
 
-# 数据加载器
 def collate_fn(batch):
     tokens = torch.stack([item['tokens'] for item in batch]).long()
     masks = torch.stack([item['mask'] for item in batch]).long()
     lengths = torch.tensor([item['seq_length'] for item in batch])
     return {'tokens': tokens, 'mask': masks, 'lengths': lengths}
 
-# 使用DistributedSampler
-sampler = DistributedSampler(
-    dataset, 
-    num_replicas=world_size, 
-    rank=local_rank,
-    shuffle=True
-)
+# 只在分布式模式下使用DistributedSampler
+if world_size > 1:
+    sampler = DistributedSampler(
+        dataset, 
+        num_replicas=world_size, 
+        rank=local_rank,
+        shuffle=True
+    )
+else:
+    sampler = None
 
 dataloader = DataLoader(
     dataset, 
@@ -125,11 +346,17 @@ dataloader = DataLoader(
     sampler=sampler,
     collate_fn=collate_fn,
     pin_memory=True,
-    num_workers=4  # 可以适当增加
+    num_workers=4
 )
 
-# 优化器和学习率调度
 optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
+
+# 如果resume from checkpoint，也恢复optimizer状态
+if args.resume_from and os.path.exists(args.resume_from):
+    checkpoint = torch.load(args.resume_from, map_location='cpu')
+    if 'optimizer' in checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer'])
+
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
     optimizer, 
     max_lr=config.learning_rate,
@@ -137,18 +364,22 @@ scheduler = torch.optim.lr_scheduler.OneCycleLR(
     epochs=config.epochs
 )
 
-# 训练循环（带梯度累积）
 accum_steps = 4 if config.max_seq_length > 1024 else 1
 
-for epoch in range(config.epochs):
+# 从start_epoch开始训练
+if local_rank == 0:
+    print(f"\n🚀 Starting training from epoch {start_epoch} to {config.epochs}")
+    print(f"   Total epochs to train: {config.epochs - start_epoch}")
+    print(f"{'='*80}\n")
+
+for epoch in range(start_epoch, config.epochs):
     model.train()
     total_loss = 0
     optimizer.zero_grad()
     
-    # 设置epoch对于DistributedSampler很重要
-    sampler.set_epoch(epoch)
+    if sampler is not None:
+        sampler.set_epoch(epoch)
     
-    # 只在主进程显示进度条
     if local_rank == 0:
         dataloader_iter = tqdm(dataloader, desc=f"Epoch {epoch+1}/{config.epochs}")
     else:
@@ -159,27 +390,17 @@ for epoch in range(config.epochs):
         masks = batch['mask'].to(device, non_blocking=True).long()
         lengths = batch['lengths']
         
-        # 创建注意力掩码（忽略填充位置）
-        attn_mask = (inputs != dataset.SEQ_PAD_TOKEN).float().to(device)
+        attn_mask = (inputs != config.pad_token_id).float().to(device)
         
-        # 创建标签
         labels = inputs.clone().long()
-        labels[masks == 0] = -100  # 只计算motion位置的损失
+        labels[masks == 0] = -100
         
-        # 模型前向
-        outputs = model(
-            inputs, 
-            labels=labels,
-            attention_mask=attn_mask
-        )
-        loss = outputs.loss / accum_steps  # 梯度累积
+        outputs = model(inputs, labels=labels, attention_mask=attn_mask)
+        loss = outputs.loss / accum_steps
         
-        # 反向传播
         loss.backward()
         
-        # 梯度累积
         if (step + 1) % accum_steps == 0:
-            # 梯度裁剪（防止长序列梯度爆炸）
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             scheduler.step()
@@ -187,8 +408,15 @@ for epoch in range(config.epochs):
         
         total_loss += loss.item() * accum_steps
         
-        # 只在主进程记录指标
-        if local_rank == 0 and {step % 500 == 0 or step == len(dataloader) - 1}:
+        # 添加调试信息
+        if local_rank == 0 and step == 0:
+            print(f"📊 Epoch {epoch+1}, Step {step+1}: Loss = {loss.item() * accum_steps:.4f}")
+            print(f"   Input shape: {inputs.shape}, Labels shape: {labels.shape}")
+            print(f"   Attention mask shape: {attn_mask.shape}")
+            print(f"   Motion mask shape: {masks.shape}")
+            print(f"   Valid motion tokens: {masks.sum().item()}/{masks.numel()}")
+        
+        if local_rank == 0 and (step % 500 == 0 or step == len(dataloader) - 1):
             log_data = {
                 "train/loss": loss.item() * accum_steps,
                 "train/lr": scheduler.get_last_lr()[0],
@@ -200,34 +428,33 @@ for epoch in range(config.epochs):
             wandb.log(log_data)
             dataloader_iter.set_postfix(loss=loss.item() * accum_steps)
 
-
     print(f"Epoch {epoch+1}/{config.epochs} | Loss: {total_loss / len(dataloader):.4f} | LR: {scheduler.get_last_lr()[0]:.6f}")
     
-    # 每个epoch结束，同步所有进程
-    dist.barrier()
+    if world_size > 1:
+        dist.barrier()
     
-    # 只在主进程记录和保存
     if local_rank == 0:
         avg_loss = total_loss / len(dataloader)
-        wandb.log({
-            "epoch/loss": avg_loss,
-            "epoch": epoch
-        })
+        wandb.log({"epoch/loss": avg_loss, "epoch": epoch})
         print(f"Epoch {epoch+1}/{config.epochs} | Loss: {avg_loss:.4f}")
         
-        # 保存检查点
         if (epoch + 1) % 50 == 0:
             ckpt_path = f"output/motion_adaptor_v2/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
+            # 在DDP模式下使用model.module，否则直接使用model
+            model_to_save = model.module if world_size > 1 else model
             torch.save({
                 'epoch': epoch,
-                'model_state': model.module.state_dict(),
+                'model_state': model_to_save.state_dict(),
                 'optimizer': optimizer.state_dict(),
+                'config': config,
             }, ckpt_path)
             wandb.save(ckpt_path)
+            print(f"💾 Saved checkpoint: {ckpt_path}")
 
-# 保存最终模型
 if local_rank == 0:
-    model.module.save_pretrained(f"output/motion_adaptor_v2/{config.exp_name}")
+    # 在DDP模式下使用model.module，否则直接使用model
+    model_to_save = model.module if world_size > 1 else model
+    model_to_save.save_pretrained(f"output/motion_adaptor_v2/{config.exp_name}")
 
-# 清理分布式进程
-dist.destroy_process_group()
+if world_size > 1:
+    dist.destroy_process_group()

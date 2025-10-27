@@ -51,12 +51,15 @@ class VQVae(nn.Module):
                                activation=activation,
                                norm=norm)
 
+        # 🔧 从kwargs中获取mu参数，默认为0.99
+        mu = kwargs.get('mu', 0.99)
+        
         if quantizer == "ema_reset":
-            self.quantizer = QuantizeEMAReset(code_num, code_dim, mu=0.99)
+            self.quantizer = QuantizeEMAReset(code_num, code_dim, mu=mu)
         elif quantizer == "orig":
             self.quantizer = Quantizer(code_num, code_dim, beta=1.0)
         elif quantizer == "ema":
-            self.quantizer = QuantizeEMA(code_num, code_dim, mu=0.99)
+            self.quantizer = QuantizeEMA(code_num, code_dim, mu=mu)
         elif quantizer == "reset":
             self.quantizer = QuantizeReset(code_num, code_dim)
 
