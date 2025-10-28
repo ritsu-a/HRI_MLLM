@@ -14,7 +14,7 @@ from HRI_mllm.model.qwen2_5omni_motion.monkey_patch_generate import monkey_patch
 from HRI_mllm.model.qwen2_5omni.streamers import QwenMotionAdaptorStreamer
 from HRI_mllm import ROOT, DATA_ROOT, OUTPUT_ROOT
 
-from HRI_mllm.utils.motion_utils.g1ml3d import vec_to_data_pkl, feats2datapkl
+from HRI_mllm.utils.motion_utils.g1ml3d_final import vec_to_data_pkl, feats2datapkl
 from HRI_mllm.utils.motion_utils.g1ml3d_final import load_normalization_stats
 from HRI_mllm.model.motion_encoder.vqvae import VQVae, VQVAE_Trans
 from HRI_mllm.model.motion_encoder.vqvae_body_hand import VQVaeBodyHand
@@ -35,9 +35,8 @@ import os
 import sys
 import pickle
 
-from HRI_mllm.model.gpt2_adaptor.model import MixedInputGPT2
-
 from transformers import GPT2Config, GPT2LMHeadModel
+from HRI_mllm.model.gpt2_adaptor.model import MixedInputGPT2
 from types import SimpleNamespace
 import soundfile as sf
 
@@ -78,7 +77,7 @@ def audioToken2motionPkl(audio_codes, motion_tokens_gt):
     config = SimpleNamespace(**config)
 
     def generate_for_long_audio(audio_tokens, motion_tokens_gt, model, device, max_length=4096, 
-                           top_k=50, temperature=0.8, repetition_penalty=1.8):
+                           top_k=50, temperature=0.3, repetition_penalty=1.2, use_greedy=False):
         """
         生成长音频对应的运动token，使用多样性增强技术
         
@@ -131,9 +130,14 @@ def audioToken2motionPkl(audio_codes, motion_tokens_gt):
                     mask[top_k_indices] = next_token_logits[top_k_indices]
                     next_token_logits = mask
                 
-                # 使用softmax和多项式采样
-                probs = torch.softmax(next_token_logits, dim=-1)
-                next_token = torch.multinomial(probs, num_samples=1).item()
+                # 选择采样策略
+                if use_greedy:
+                    # 贪心解码：选择概率最高的token
+                    next_token = torch.argmax(next_token_logits).item()
+                else:
+                    # 随机采样
+                    probs = torch.softmax(next_token_logits, dim=-1)
+                    next_token = torch.multinomial(probs, num_samples=1).item()
                 
                 # 将生成的 token 约束到合法的 motion 码本范围：
                 # 偶数次 motion（body）∈ [0, 511]；奇数次 motion（hand）∈ [512, 1023]
@@ -167,19 +171,33 @@ def audioToken2motionPkl(audio_codes, motion_tokens_gt):
         motion_tokens = [t for t in generated]
         return motion_tokens
     
-    motion_tokens = generate_for_long_audio(audio_codes.squeeze(0), range(10000), motion_adaptor, device=motion_adaptor.device)
-    if len(motion_tokens) % 2 != 0:
-        motion_tokens = motion_tokens[:-1]
-    body_tokens = torch.tensor(motion_tokens[0::2]).unsqueeze(0).to("cuda")
-    hand_tokens = torch.tensor(motion_tokens[1::2]).unsqueeze(0).to("cuda")
-
-    # 解码：body tokens直接使用，hand tokens需要减去code_num偏移
-    code_num = 512
-    decoded = motion_vae.decode((body_tokens, hand_tokens - code_num))
+    # 尝试不同的生成策略
+    print("🔄 尝试贪心解码（确定性生成）...")
+    motion_tokens = generate_for_long_audio(audio_codes.squeeze(0), range(10000), motion_adaptor, device=motion_adaptor.device, use_greedy=True)
     
-    # 使用与训练时相同的统计量进行反归一化
-    decoded_denorm = decoded * std_t + mean_t
-    data_dict_decoded = feats2datapkl(decoded_denorm)
+    # 参考test_visualize_gt_tokens.py的解码方式
+    if len(motion_tokens) % 2 != 0:
+        print(f"Warning: motion_tokens length ({len(motion_tokens)}) is odd, dropping last token")
+        motion_tokens = motion_tokens[:-1]
+    
+    body_tokens = motion_tokens[0::2]  # even indices
+    hand_tokens = motion_tokens[1::2]  # odd indices
+    
+    # Convert to tensors
+    body_tokens = torch.tensor(body_tokens).unsqueeze(0).to("cuda")
+    # hand tokens need to subtract 512 offset
+    hand_tokens = torch.tensor(hand_tokens).unsqueeze(0).to("cuda") - 512
+    
+    print(f"Body tokens shape: {body_tokens.shape}, range: [{body_tokens.min()}, {body_tokens.max()}]")
+    print(f"Hand tokens shape: {hand_tokens.shape}, range: [{hand_tokens.min()}, {hand_tokens.max()}]")
+    
+    # Decode using VAE - this returns normalized features
+    decoded = motion_vae.decode((body_tokens, hand_tokens))
+    
+    print(f"Decoded shape: {decoded.shape}")
+    
+    # Convert to data format (feats2datapkl will handle denormalization with provided stats)
+    data_dict_decoded = feats2datapkl(decoded, mean=mean_t.cpu().numpy(), std=std_t.cpu().numpy())
 
     return data_dict_decoded, motion_tokens
 
@@ -193,11 +211,18 @@ parser.add_argument('--vqvae_checkpoint', type=str, default=None,
 parser.add_argument('--audio_path', type=str, default="/root/workspace/HRI_MLLM/data/beat_english_v0.2.1/1/1_wayne_0_1_1_qwen1.wav",
                    help='Input audio file path')
 parser.add_argument('--motion_adaptor_path', type=str, 
-                   default="output/motion_adaptor_v2/kimi_audio_motion_gpt2_brainco_30_100",
-                   help='Motion adaptor model path')
+                   default="output/motion_adaptor_v3/kimi_audio_motion_gpt2_brainco_30_100/transformers_format",
+                   help='Motion adaptor model path (transformers format directory)')
 args = parser.parse_args()
 
-motion_adaptor = MixedInputGPT2.from_pretrained(args.motion_adaptor_path, device_map="auto")
+# 加载模型 - 使用新的transformers格式
+config = GPT2Config.from_pretrained(args.motion_adaptor_path)
+model_path = os.path.join(args.motion_adaptor_path, "pytorch_model.bin")
+motion_adaptor = MixedInputGPT2(config, audio_hidden_size=3584)
+motion_adaptor.load_state_dict(torch.load(model_path, map_location="cpu"))
+motion_adaptor.to("cuda")
+motion_adaptor.eval()
+print(f"✅ Motion adaptor loaded from: {args.motion_adaptor_path}")
 
 ### Loading motion VQ-VAE (Semantic Enhanced)
 def open_yaml(path):
@@ -271,7 +296,16 @@ audio_tokens = torch.from_numpy(np.array(prompt_manager._tokenize_audio(audio_pa
 
 # motion_tokens = motion_vae.encode(normalize_vec(torch.from_numpy(train_data_feature).unsqueeze(0).to("cuda:0")))[0]
 
+# 生成motion并保存结果
 motion_pkl, llm_motion_tokens = audioToken2motionPkl(audio_tokens, None)
+
+# 添加调试信息
+print(f"\n📊 生成统计信息:")
+print(f"   - 生成的motion tokens数量: {len(llm_motion_tokens)}")
+print(f"   - Body tokens: {len(llm_motion_tokens[0::2])}")
+print(f"   - Hand tokens: {len(llm_motion_tokens[1::2])}")
+print(f"   - Body token范围: [{min(llm_motion_tokens[0::2])}, {max(llm_motion_tokens[0::2])}]")
+print(f"   - Hand token范围: [{min(llm_motion_tokens[1::2])}, {max(llm_motion_tokens[1::2])}]")
 
 
 # decoded_features = motion_vae.decode(motion_tokens).detach().cpu()
@@ -303,7 +337,130 @@ import shutil
 shutil.copyfile(audio_path, "audio.wav")
 
 
-vis_audio_motion("llm.csv", output_path="final_output_llm.mp4", audio_path="audio.wav", robot_type="g1_brainco", rate_limit=False, motion_fps=25)
-# vis_audio_motion("decoded.csv", output_path="final_output_decoded.mp4", audio_path="audio.wav", robot_type="g1_brainco", rate_limit=False)
-# vis_audio_motion("source.csv", output_path="final_output_source.mp4", audio_path="audio.wav", robot_type="g1_brainco", rate_limit=False)
+vis_audio_motion("llm.csv", output_path="final_output_llm_greedy.mp4", audio_path="audio.wav", robot_type="g1_brainco", rate_limit=False, motion_fps=25)
+
+# 额外测试：尝试随机采样
+print("\n🔄 尝试随机采样（对比测试）...")
+# 直接调用原函数，但修改use_greedy参数
+# 我们需要重新定义audioToken2motionPkl函数来支持随机采样
+def audioToken2motionPkl_random(audio_codes, motion_tokens_gt):
+    """随机采样版本的生成函数"""
+    config={
+        "beat_tts_root": "/root/workspace/HRI_MLLM/data/BEAT_v2_kimi",
+        "audio_vocab_size": 16384,
+        "motion_vocab_size": 512*2,  # 与训练配置一致
+        "total_vocab_size": 512*2 + 2,
+        "max_seq_length": 4096,
+        "min_seq_length": 128,
+        "batch_size": 8,
+        "learning_rate": 1e-4,
+        "epochs": 1000,
+        "sliding_window_step": 32,
+        "pad_token_id": 512*2 + 1,
+        "interleave_ratio": [1, 1],
+    }
+    config = SimpleNamespace(**config)
+
+    def generate_for_long_audio_random(audio_tokens, motion_tokens_gt, model, device, max_length=4096, 
+                               top_k=50, temperature=0.8, repetition_penalty=1.8):
+        """随机采样版本"""
+        model.eval()
+        generated = []
+        current_seq = []
+        motion_count = 0
+        max_context = max_length - 50
+        token_labels = []
+        generated_history = []
+        
+        with torch.no_grad():
+            for i, token in enumerate(audio_tokens):
+                current_seq.append(token)
+                token_labels.append(-100)
+                
+                inputs = torch.tensor([current_seq]).to(device)
+                attn_mask = torch.ones_like(inputs).to(dtype=torch.long).to(device)
+                labels = torch.tensor([token_labels]).to(device)
+
+                output = model(inputs, attention_mask=attn_mask, labels=labels)
+                next_token_logits = output.logits[0, -1, :]
+                
+                # 应用重复惩罚
+                if repetition_penalty != 1.0 and generated_history:
+                    for token_id in set(generated_history):
+                        next_token_logits[token_id] = next_token_logits[token_id] / repetition_penalty
+                
+                # 应用temperature
+                next_token_logits = next_token_logits / temperature
+                
+                # top-k采样
+                if top_k > 0:
+                    top_k_values, top_k_indices = torch.topk(next_token_logits, top_k)
+                    mask = torch.ones_like(next_token_logits) * float('-inf')
+                    mask[top_k_indices] = next_token_logits[top_k_indices]
+                    next_token_logits = mask
+                
+                # 随机采样
+                probs = torch.softmax(next_token_logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1).item()
+                
+                # Token约束
+                code_num = 512
+                if motion_count % 2 == 0:
+                    next_token = int(next_token % code_num)
+                else:
+                    next_token = int(code_num + (next_token % code_num))
+
+                generated.append(next_token)
+                generated_history.append(next_token)
+                
+                if len(generated_history) > 100:
+                    generated_history = generated_history[-100:]
+                
+                current_seq.append(next_token)  
+                token_labels.append(next_token)
+                motion_count += 1
+
+                if len(current_seq) >= max_length:
+                    break
+                if motion_count >= len(motion_tokens_gt):
+                    break   
+        
+        return [t for t in generated]
+    
+    motion_tokens = generate_for_long_audio_random(audio_codes.squeeze(0), range(10000), motion_adaptor, device=motion_adaptor.device)
+    
+    # 解码部分
+    if len(motion_tokens) % 2 != 0:
+        print(f"Warning: motion_tokens length ({len(motion_tokens)}) is odd, dropping last token")
+        motion_tokens = motion_tokens[:-1]
+    
+    body_tokens = motion_tokens[0::2]
+    hand_tokens = motion_tokens[1::2]
+    
+    body_tokens = torch.tensor(body_tokens).unsqueeze(0).to("cuda")
+    hand_tokens = torch.tensor(hand_tokens).unsqueeze(0).to("cuda") - 512
+    
+    print(f"Random - Body tokens shape: {body_tokens.shape}, range: [{body_tokens.min()}, {body_tokens.max()}]")
+    print(f"Random - Hand tokens shape: {hand_tokens.shape}, range: [{hand_tokens.min()}, {hand_tokens.max()}]")
+    
+    decoded = motion_vae.decode((body_tokens, hand_tokens))
+    print(f"Random - Decoded shape: {decoded.shape}")
+    
+    data_dict_decoded = feats2datapkl(decoded, mean=mean_t.cpu().numpy(), std=std_t.cpu().numpy())
+    return data_dict_decoded, motion_tokens
+
+motion_pkl_random, llm_motion_tokens_random = audioToken2motionPkl_random(audio_tokens, None)
+with open("output_random.pkl", 'wb') as f:
+    pickle.dump(motion_pkl_random, f)
+motion_csv_random = load_motion_pkl_as_csv_data("output_random.pkl")
+np.savetxt("llm_random.csv", motion_csv_random, delimiter=',', fmt='%.8f')
+vis_audio_motion("llm_random.csv", output_path="final_output_llm_random.mp4", audio_path="audio.wav", robot_type="g1_brainco", rate_limit=False, motion_fps=25)
+
+print("\n✅ 生成了两个对比视频:")
+print("   - final_output_llm_greedy.mp4 (贪心解码)")
+print("   - final_output_llm_random.mp4 (随机采样)")
+print("\n💡 建议:")
+print("   1. 比较两个视频的质量差异")
+print("   2. 如果贪心解码效果更好，说明模型训练良好但采样策略需要调整")
+print("   3. 如果两者效果都不好，可能需要检查VQ-VAE解码或数据预处理")
     

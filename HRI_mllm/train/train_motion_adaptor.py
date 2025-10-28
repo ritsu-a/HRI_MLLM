@@ -117,8 +117,8 @@ parser.add_argument('--epochs', type=int, default=300,
 args = parser.parse_args()
 
 exp_name = "kimi_audio_motion_gpt2_brainco_30_100"
-os.makedirs(os.path.join("output/motion_adaptor_v2", exp_name), exist_ok=True)
-os.makedirs(os.path.join("output/motion_adaptor_v2", exp_name, "checkpoints"), exist_ok=True)
+os.makedirs(os.path.join("output/motion_adaptor_v3", exp_name), exist_ok=True)
+os.makedirs(os.path.join("output/motion_adaptor_v3", exp_name, "checkpoints"), exist_ok=True)
 
 os.environ["WANDB_MODE"] = "offline"
 
@@ -439,7 +439,7 @@ for epoch in range(start_epoch, config.epochs):
         print(f"Epoch {epoch+1}/{config.epochs} | Loss: {avg_loss:.4f}")
         
         if (epoch + 1) % 50 == 0:
-            ckpt_path = f"output/motion_adaptor_v2/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
+            ckpt_path = f"output/motion_adaptor_v3/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
             # 在DDP模式下使用model.module，否则直接使用model
             model_to_save = model.module if world_size > 1 else model
             torch.save({
@@ -454,7 +454,7 @@ for epoch in range(start_epoch, config.epochs):
 if local_rank == 0:
     # 在DDP模式下使用model.module，否则直接使用model
     model_to_save = model.module if world_size > 1 else model
-    model_to_save.save_pretrained(f"output/motion_adaptor_v2/{config.exp_name}")
+    model_to_save.save_pretrained(f"output/motion_adaptor_v3/{config.exp_name}")
 
 if world_size > 1:
     dist.destroy_process_group()

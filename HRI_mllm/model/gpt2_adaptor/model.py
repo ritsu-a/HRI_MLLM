@@ -23,7 +23,7 @@ class MixedInputGPT2(GPT2LMHeadModel):
             saved_weight,
             padding_idx=152063,
             freeze=True,
-        ).to(self.device)
+        )
         for param in self.audio_tokenizer.parameters():
             param.requires_grad = False
         
@@ -48,25 +48,31 @@ class MixedInputGPT2(GPT2LMHeadModel):
         )
         
         # 处理audio tokens
-        audio_mask = (labels == -100) * (attention_mask == 1)
-        if audio_mask.any():
-            audio_tokens = input_data[audio_mask]
+        if labels is not None and attention_mask is not None:
+            audio_mask = (labels == -100) * (attention_mask == 1)
+            if audio_mask.any():
+                audio_tokens = input_data[audio_mask]
 
-            audio_embeds = self.audio_tokenizer(audio_tokens.long()).detach()
+                audio_embeds = self.audio_tokenizer(audio_tokens.long()).detach()
 
-            projected_hidden = self.input_projection(audio_embeds.float())
+                projected_hidden = self.input_projection(audio_embeds.float())
 
-            # 将token embeddings放入对应位置
-            hidden_states[audio_mask] = projected_hidden
-        
-        # 处理motion tokens
-        motion_mask = ~audio_mask
-        if motion_mask.any():
-            motion_tokens = input_data[motion_mask]
+                # 将token embeddings放入对应位置
+                hidden_states[audio_mask] = projected_hidden
+            
+            # 处理motion tokens
+            motion_mask = ~audio_mask
+            if motion_mask.any():
+                motion_tokens = input_data[motion_mask]
+                motion_embeds = self.transformer.wte(motion_tokens.long())
+
+                # 将projected hidden states放入对应位置
+                hidden_states[motion_mask] = motion_embeds
+        else:
+            # 如果没有labels和attention_mask，假设所有输入都是motion tokens
+            motion_tokens = input_data
             motion_embeds = self.transformer.wte(motion_tokens.long())
-
-            # 将projected hidden states放入对应位置
-            hidden_states[motion_mask] = motion_embeds
+            hidden_states = motion_embeds
         
         # # 添加位置编码
         # position_ids = torch.arange(seq_length, dtype=torch.long, device=input_data.device)
