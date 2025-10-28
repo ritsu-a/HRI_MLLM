@@ -8,5 +8,5 @@ torchrun \
   HRI_mllm/train/train_motion_adaptor.py \
   --resume_from output/motion_adaptor_v2/kimi_audio_motion_gpt2_brainco_30_100/checkpoints/epoch_300.pt \
   --datasets BEAT \
-  --epochs 1000
+  --epochs 600
 

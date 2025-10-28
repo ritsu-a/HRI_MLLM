@@ -117,8 +117,8 @@ parser.add_argument('--epochs', type=int, default=300,
 args = parser.parse_args()
 
 exp_name = "kimi_audio_motion_gpt2_brainco_30_100"
-os.makedirs(os.path.join("output/motion_adaptor_v3", exp_name), exist_ok=True)
-os.makedirs(os.path.join("output/motion_adaptor_v3", exp_name, "checkpoints"), exist_ok=True)
+os.makedirs(os.path.join("output/motion_adaptor_v4", exp_name), exist_ok=True)
+os.makedirs(os.path.join("output/motion_adaptor_v4", exp_name, "checkpoints"), exist_ok=True)
 
 os.environ["WANDB_MODE"] = "offline"
 
@@ -229,7 +229,7 @@ if args.resume_from and os.path.exists(args.resume_from):
         print(f"🔄 Resuming from checkpoint: {args.resume_from}")
         print(f"{'='*80}")
     
-    checkpoint = torch.load(args.resume_from, map_location='cpu')
+    checkpoint = torch.load(args.resume_from, map_location='cpu', weights_only=True)
     model.load_state_dict(checkpoint['model_state'])
     start_epoch = checkpoint.get('epoch', 0) + 1
     
@@ -439,14 +439,13 @@ for epoch in range(start_epoch, config.epochs):
         print(f"Epoch {epoch+1}/{config.epochs} | Loss: {avg_loss:.4f}")
         
         if (epoch + 1) % 50 == 0:
-            ckpt_path = f"output/motion_adaptor_v3/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
+            ckpt_path = f"output/motion_adaptor_v4/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
             # 在DDP模式下使用model.module，否则直接使用model
             model_to_save = model.module if world_size > 1 else model
             torch.save({
                 'epoch': epoch,
                 'model_state': model_to_save.state_dict(),
                 'optimizer': optimizer.state_dict(),
-                'config': config,
             }, ckpt_path)
             wandb.save(ckpt_path)
             print(f"💾 Saved checkpoint: {ckpt_path}")
@@ -454,7 +453,7 @@ for epoch in range(start_epoch, config.epochs):
 if local_rank == 0:
     # 在DDP模式下使用model.module，否则直接使用model
     model_to_save = model.module if world_size > 1 else model
-    model_to_save.save_pretrained(f"output/motion_adaptor_v3/{config.exp_name}")
+    model_to_save.save_pretrained(f"output/motion_adaptor_v4/{config.exp_name}")
 
 if world_size > 1:
     dist.destroy_process_group()
