@@ -11,7 +11,7 @@ source /root/anaconda3/bin/activate qwen
 
 # 设置参数
 JSONL_PATH="/root/workspace/HRI_MLLM/data/BEAT_v2_kimi_tokens.jsonl"
-GPT2_MODEL_PATH="/root/workspace/HRI_MLLM/output/motion_adaptor_v2/kimi_audio_motion_gpt2_brainco_30_100/checkpoints/epoch_300.pt"
+GPT2_MODEL_PATH="/root/workspace/HRI_MLLM/output/motion_adaptor_10_v4/kimi_audio_motion_gpt2_brainco_30_100/checkpoints/epoch_500.pt"
 OUTPUT_DIR="./mode_comparison_test"
 NUM_SAMPLES=3  # 对比3个样本
 MAX_NEW_TOKENS=4096

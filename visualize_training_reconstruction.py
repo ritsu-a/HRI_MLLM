@@ -66,7 +66,7 @@ def load_gpt2_from_checkpoint(checkpoint_path, device="cuda"):
     
     # 创建模型配置（使用训练时的默认配置）
     model_config = GPT2Config(
-        vocab_size=1026,  # 512*2 + 2 (motion_vocab_size + pad_token)
+        vocab_size=1034,  # 512*2 + 10 (motion_vocab_size + pad_token)
         n_positions=4096,  # max_seq_length
         n_embd=768,
         n_layer=12,

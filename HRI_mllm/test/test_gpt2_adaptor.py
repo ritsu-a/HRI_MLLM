@@ -86,7 +86,7 @@ def generate_motion_tokens(model, audio_tokens, device="cuda", max_new_tokens=25
                     attn_mask = torch.ones_like(inputs)
                     labels = torch.tensor(token_labels).unsqueeze(0).to(device)
                     
-                    # 调用模型forward方法 - 使用input_data参数
+                    # 调用模型forward方法
                     output = model(input_data=inputs, attention_mask=attn_mask, labels=labels)
                     next_token_logits = output.logits[0, -1, :]
                     
@@ -209,7 +209,7 @@ def audioToken2motionPkl(audio_codes, motion_tokens_gt):
     motion_tokens = generate_motion_tokens(
         motion_adaptor, 
         audio_codes.squeeze(0), 
-        device=motion_adaptor.device,
+        device="cuda",
         max_new_tokens=4096,
         temperature=1.8,
         top_k=50,
@@ -231,11 +231,10 @@ parser.add_argument('--vqvae_checkpoint', type=str, default=None,
 parser.add_argument('--audio_path', type=str, default="/root/workspace/HRI_MLLM/data/beat_english_v0.2.1/1/1_wayne_0_1_1_qwen1.wav",
                    help='Input audio file path')
 parser.add_argument('--motion_adaptor_path', type=str, 
-                   default="output/motion_adaptor_v2/kimi_audio_motion_gpt2_brainco_30_100/checkpoints/epoch_300.pt",
+                   default="output/motion_adaptor_10_v4/kimi_audio_motion_gpt2_brainco_30_100/checkpoints/epoch_500.pt",
                    help='Motion adaptor model path. Supports two formats: 1) checkpoint file (.pt format), 2) transformers format directory (with config.json and pytorch_model.bin)')
 args = parser.parse_args()
 
-# 加载模型 - 支持checkpoint和transformers格式
 def load_gpt2_model(model_path, device="cuda"):
     """加载训练完成的GPT2 adaptor模型
     
@@ -265,7 +264,7 @@ def load_gpt2_from_checkpoint(checkpoint_path, device="cuda"):
     
     # 创建模型配置（使用训练时的默认配置）
     model_config = GPT2Config(
-        vocab_size=1026,  # 512*2 + 2 (motion_vocab_size + pad_token)
+        vocab_size=1034,  # 512*2 + 10 (motion_vocab_size + pad_token)
         n_positions=4096,  # max_seq_length
         n_embd=768,
         n_layer=12,
