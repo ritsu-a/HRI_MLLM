@@ -30,7 +30,8 @@ class JSONAudioMotionDataset(Dataset):
                  min_audio_length: int = 32,
                  min_motion_length: int = 16,
                  token_offset: int = 0,
-                 debug: bool = False):
+                 debug: bool = False,
+                 preprocessed_hidden_states_dir: Optional[str] = None):
         """
         Args:
             json_path: JSON文件路径
@@ -41,6 +42,7 @@ class JSONAudioMotionDataset(Dataset):
             min_motion_length: 最小motion token长度
             token_offset: token偏移量
             debug: 是否开启调试模式
+            preprocessed_hidden_states_dir: 预处理hidden states目录路径（如果提供，将使用预处理的hidden states）
         """
         self.json_path = json_path
         self.max_audio_length = max_audio_length
@@ -50,6 +52,8 @@ class JSONAudioMotionDataset(Dataset):
         self.min_motion_length = min_motion_length
         self.token_offset = token_offset
         self.debug = debug
+        self.preprocessed_hidden_states_dir = preprocessed_hidden_states_dir
+        self.use_preprocessed = preprocessed_hidden_states_dir is not None and os.path.exists(preprocessed_hidden_states_dir)
         
         self.samples = []
         self.stats = {
@@ -61,6 +65,19 @@ class JSONAudioMotionDataset(Dataset):
             'avg_audio_len': 0,
             'avg_motion_len': 0
         }
+        
+        # 如果使用预处理的hidden states，加载索引
+        self.preprocessed_index = None
+        if self.use_preprocessed:
+            index_path = os.path.join(preprocessed_hidden_states_dir, "index.json")
+            if os.path.exists(index_path):
+                with open(index_path, 'r', encoding='utf-8') as f:
+                    self.preprocessed_index = json.load(f)
+                print(f"✅ Loaded preprocessed hidden states from: {preprocessed_hidden_states_dir}")
+                print(f"   - Processed samples: {len(self.preprocessed_index.get('samples', []))}")
+            else:
+                print(f"⚠️  Preprocessed directory exists but index.json not found, will process from scratch")
+                self.use_preprocessed = False
         
         self._load_data()
         self._print_stats()
@@ -305,7 +322,7 @@ class JSONAudioMotionDataset(Dataset):
             if sample[field] is None:
                 raise ValueError(f"Sample at index {idx} has None value for field: {field}")
         
-        return {
+        result = {
             'user_text': sample['user_text'],
             'user_audio_tokens': sample['user_audio_tokens'],
             'assistant_audio_tokens': sample['assistant_audio_tokens'],
@@ -318,6 +335,128 @@ class JSONAudioMotionDataset(Dataset):
             'sequence_length': sample['sequence_length'],
             'sample_idx': sample['sample_idx']
         }
+        
+        # 如果使用预处理的hidden states，加载它们
+        if self.use_preprocessed and self.preprocessed_index:
+            sample_idx = sample['sample_idx']
+            preprocessed_samples = self.preprocessed_index.get('samples', [])
+            # 查找对应的预处理样本
+            preprocessed_sample = None
+            for ps in preprocessed_samples:
+                if ps.get('sample_idx') == sample_idx:
+                    preprocessed_sample = ps
+                    break
+            
+            if preprocessed_sample:
+                hidden_states_path = preprocessed_sample.get('hidden_states_path')
+                if hidden_states_path:
+                    # 如果是绝对路径，直接使用
+                    if os.path.isabs(hidden_states_path):
+                        pass  # 直接使用绝对路径
+                    else:
+                        # 如果是相对路径，需要正确处理
+                        # hidden_states_path可能是 "hidden_states/sample_000000.pt" 或 "sample_000000.pt"
+                        if 'hidden_states' in hidden_states_path:
+                            # 已经包含hidden_states子目录，直接拼接
+                            hidden_states_path = os.path.join(
+                                self.preprocessed_hidden_states_dir,
+                                hidden_states_path
+                            )
+                        else:
+                            # 只有文件名，需要加上hidden_states子目录
+                            hidden_states_path = os.path.join(
+                                self.preprocessed_hidden_states_dir,
+                                "hidden_states",
+                                os.path.basename(hidden_states_path)
+                            )
+                    
+                    # 验证路径是否存在，如果不存在尝试其他可能的路径
+                    if not os.path.exists(hidden_states_path):
+                        # 尝试其他可能的路径格式
+                        alternative_paths = [
+                            os.path.join(self.preprocessed_hidden_states_dir, "hidden_states", os.path.basename(hidden_states_path)),
+                            os.path.join(self.preprocessed_hidden_states_dir, os.path.basename(hidden_states_path)),
+                        ]
+                        found = False
+                        for alt_path in alternative_paths:
+                            if os.path.exists(alt_path):
+                                hidden_states_path = alt_path
+                                found = True
+                                break
+                        if not found:
+                            if self.debug:
+                                print(f"⚠️  Preprocessed hidden states file not found for sample {sample_idx}")
+                                print(f"   Tried path: {hidden_states_path}")
+                                print(f"   Tried alternatives: {alternative_paths}")
+                            result['use_preprocessed'] = False
+                        else:
+                            if self.debug:
+                                print(f"✅ Found preprocessed file at alternative path: {hidden_states_path}")
+                    else:
+                        if self.debug:
+                            print(f"✅ Found preprocessed file: {hidden_states_path}")
+                    
+                    # 如果路径存在，加载数据
+                    if os.path.exists(hidden_states_path):
+                        try:
+                            hidden_states_data = torch.load(hidden_states_path, map_location='cpu', weights_only=False)
+                            
+                            # 验证数据格式
+                            if not isinstance(hidden_states_data, dict):
+                                if self.debug:
+                                    print(f"⚠️  Preprocessed file is not a dict for sample {sample_idx}: {type(hidden_states_data)}")
+                                result['use_preprocessed'] = False
+                            elif 'text_hidden_states' not in hidden_states_data or 'audio_hidden_states' not in hidden_states_data:
+                                if self.debug:
+                                    print(f"⚠️  Preprocessed file missing required keys for sample {sample_idx}: {hidden_states_path}")
+                                    print(f"   Available keys: {list(hidden_states_data.keys())}")
+                                result['use_preprocessed'] = False
+                            else:
+                                text_hs = hidden_states_data['text_hidden_states']
+                                audio_hs = hidden_states_data['audio_hidden_states']
+                                
+                                # 验证tensor有效性
+                                if text_hs is None or audio_hs is None:
+                                    if self.debug:
+                                        print(f"⚠️  Preprocessed hidden states are None for sample {sample_idx}")
+                                    result['use_preprocessed'] = False
+                                elif not isinstance(text_hs, torch.Tensor) or not isinstance(audio_hs, torch.Tensor):
+                                    if self.debug:
+                                        print(f"⚠️  Preprocessed hidden states are not tensors for sample {sample_idx}: text_hs={type(text_hs)}, audio_hs={type(audio_hs)}")
+                                    result['use_preprocessed'] = False
+                                else:
+                                    # 验证tensor形状
+                                    if len(text_hs.shape) != 2 or len(audio_hs.shape) != 2:
+                                        if self.debug:
+                                            print(f"⚠️  Preprocessed hidden states have unexpected shapes for sample {sample_idx}: text_hs={text_hs.shape}, audio_hs={audio_hs.shape}")
+                                        result['use_preprocessed'] = False
+                                    else:
+                                        result['text_hidden_states'] = text_hs
+                                        result['audio_hidden_states'] = audio_hs
+                                        result['use_preprocessed'] = True
+                                        if self.debug:
+                                            print(f"✅ Loaded preprocessed hidden states for sample {sample_idx}: text_hs shape={text_hs.shape}, audio_hs shape={audio_hs.shape}")
+                        except Exception as e:
+                            if self.debug:
+                                print(f"⚠️  Failed to load preprocessed hidden states for sample {sample_idx} from {hidden_states_path}: {e}")
+                                import traceback
+                                traceback.print_exc()
+                            else:
+                                # 即使不是debug模式，也要打印关键错误
+                                print(f"⚠️  Failed to load preprocessed hidden states for sample {sample_idx}: {e}")
+                            result['use_preprocessed'] = False
+                else:
+                    if self.debug:
+                        print(f"⚠️  Preprocessed sample {sample_idx} has no hidden_states_path")
+                    result['use_preprocessed'] = False
+            else:
+                if self.debug:
+                    print(f"⚠️  Preprocessed sample {sample_idx} not found in index")
+                result['use_preprocessed'] = False
+        else:
+            result['use_preprocessed'] = False
+        
+        return result
     
     def get_sample_info(self, idx: int) -> Dict[str, Any]:
         """获取样本信息"""
@@ -388,9 +527,70 @@ def collate_fn(batch: List[Dict[str, Any]], debug: bool = False) -> Dict[str, to
             elif debug:
                 print(f"   - {key}: type={type(tensor_value)}")
     
-    # 获取最大序列长度
-    max_seq_len = max(item['sequence_length'] for item in batch)
+    # 提取用户文本
+    user_texts = [item.get('user_text') for item in batch]
+    
+    # 提取用户音频tokens并处理不同长度
+    user_audio_tokens_list = []
+    assistant_audio_tokens_list = []
+    motion_tokens_list = []
+    
+    # 提取预处理的hidden states（如果存在）
+    text_hidden_states_list = []
+    audio_hidden_states_list = []
+    use_preprocessed_list = []
+    
+    # 检查batch中每个样本是否有预处理的hidden states
+    # 统计有多少样本有预处理数据
+    samples_with_preprocessed = sum(1 for item in batch if item.get('use_preprocessed', False) and 
+                                     item.get('text_hidden_states') is not None and 
+                                     item.get('audio_hidden_states') is not None)
+    total_samples = len(batch)
+    
+    # 如果某些样本有预处理数据，但某些没有，需要过滤掉没有的
+    # 或者如果所有样本都没有预处理数据，也需要处理
+    filtered_batch = []
+    filtered_indices = []
+    
+    for i, item in enumerate(batch):
+        has_preprocessed = item.get('use_preprocessed', False)
+        has_text_hs = item.get('text_hidden_states') is not None
+        has_audio_hs = item.get('audio_hidden_states') is not None
+        has_valid_preprocessed = has_preprocessed and has_text_hs and has_audio_hs
+        
+        # 如果batch中某些样本有预处理数据，但当前样本没有，跳过它
+        # 这样可以避免在没有Kimi模型时出错
+        if samples_with_preprocessed > 0 and not has_valid_preprocessed:
+            if debug:
+                print(f"⚠️  Filtering out item {i} from batch: missing preprocessed hidden states")
+                print(f"   - use_preprocessed: {has_preprocessed}, has_text_hs: {has_text_hs}, has_audio_hs: {has_audio_hs}")
+            continue
+        
+        filtered_batch.append(item)
+        filtered_indices.append(i)
+    
+    # 如果过滤后batch为空，报错
+    if not filtered_batch:
+        raise ValueError(
+            f"All samples in batch are missing preprocessed hidden states. "
+            f"Please either:\n"
+            f"  1. Ensure all samples have preprocessed hidden states, or\n"
+            f"  2. Load the Kimi model to compute hidden states on-the-fly"
+        )
+    
+    # 如果过滤掉了样本，发出警告
+    if len(filtered_batch) < len(batch):
+        filtered_count = len(batch) - len(filtered_batch)
+        print(f"⚠️  Filtered out {filtered_count}/{len(batch)} samples from batch due to missing preprocessed hidden states")
+    
+    # 使用过滤后的batch
+    batch = filtered_batch
+    
+    # 更新batch_size为过滤后的大小
     batch_size = len(batch)
+    
+    # 重新计算最大序列长度（使用过滤后的batch）
+    max_seq_len = max(item['sequence_length'] for item in batch) if batch else 1
     
     # 初始化batch tensors
     interleaved_sequences = torch.zeros(batch_size, max_seq_len, dtype=torch.long)
@@ -404,14 +604,6 @@ def collate_fn(batch: List[Dict[str, Any]], debug: bool = False) -> Dict[str, to
         token_labels[i, :seq_len] = item['token_labels']
         attention_masks[i, :seq_len] = 1
     
-    # 提取用户文本
-    user_texts = [item.get('user_text') for item in batch]
-    
-    # 提取用户音频tokens并处理不同长度
-    user_audio_tokens_list = []
-    assistant_audio_tokens_list = []
-    motion_tokens_list = []
-    
     for item in batch:
         user_audio_tokens_list.append(item['user_audio_tokens'])
         assistant_audio_tokens_list.append(item['assistant_audio_tokens'])
@@ -419,6 +611,30 @@ def collate_fn(batch: List[Dict[str, Any]], debug: bool = False) -> Dict[str, to
             motion_tokens_list.append(item['motion_tokens'])
         else:
             motion_tokens_list.append(torch.tensor([], dtype=torch.long))
+        
+        # 检查是否有预处理的hidden states（必须同时有text和audio hidden states才算有效）
+        use_preprocessed_item = item.get('use_preprocessed', False)
+        text_hs = item.get('text_hidden_states')
+        audio_hs = item.get('audio_hidden_states')
+        
+        if use_preprocessed_item and text_hs is not None and audio_hs is not None:
+            # 验证hidden states是有效的tensor
+            if isinstance(text_hs, torch.Tensor) and isinstance(audio_hs, torch.Tensor):
+                text_hidden_states_list.append(text_hs)
+                audio_hidden_states_list.append(audio_hs)
+                use_preprocessed_list.append(True)
+            else:
+                if debug:
+                    print(f"⚠️  Sample has invalid hidden states types: text_hs={type(text_hs)}, audio_hs={type(audio_hs)}")
+                text_hidden_states_list.append(None)
+                audio_hidden_states_list.append(None)
+                use_preprocessed_list.append(False)
+        else:
+            if debug and use_preprocessed_item:
+                print(f"⚠️  Sample marked as use_preprocessed but missing hidden states: text_hs={text_hs is not None}, audio_hs={audio_hs is not None}")
+            text_hidden_states_list.append(None)
+            audio_hidden_states_list.append(None)
+            use_preprocessed_list.append(False)
     
     # 找到最大长度并padding
     max_user_audio_len = max(len(tokens) for tokens in user_audio_tokens_list)
@@ -436,7 +652,10 @@ def collate_fn(batch: List[Dict[str, Any]], debug: bool = False) -> Dict[str, to
         if len(motion_tokens_item) > 0:
             motion_tokens[i, :len(motion_tokens_item)] = motion_tokens_item
     
-    return {
+    # 检查是否真正有有效的预处理数据
+    has_valid_preprocessed = any(use_preprocessed_list) and len([x for x in text_hidden_states_list if x is not None]) > 0
+    
+    result = {
         'user_text': user_texts,
         'user_audio_tokens': user_audio_tokens,
         'assistant_audio_tokens': assistant_audio_tokens,
@@ -445,8 +664,20 @@ def collate_fn(batch: List[Dict[str, Any]], debug: bool = False) -> Dict[str, to
         'token_labels': token_labels,
         'attention_masks': attention_masks,
         'batch_size': batch_size,
-        'max_seq_len': max_seq_len
+        'max_seq_len': max_seq_len,
+        'use_preprocessed': has_valid_preprocessed,
+        'text_hidden_states': text_hidden_states_list if has_valid_preprocessed else None,
+        'audio_hidden_states': audio_hidden_states_list if has_valid_preprocessed else None,
     }
+    
+    if debug:
+        print(f"🔍 Collate result:")
+        print(f"   - use_preprocessed: {has_valid_preprocessed}")
+        print(f"   - text_hidden_states_list length: {len(text_hidden_states_list)}")
+        print(f"   - Valid text_hs count: {sum(1 for x in text_hidden_states_list if x is not None)}")
+        print(f"   - Valid audio_hs count: {sum(1 for x in audio_hidden_states_list if x is not None)}")
+    
+    return result
 
 
 class MultiJSONDataset(Dataset):
@@ -514,6 +745,7 @@ def create_dataloader(json_paths: List[str],
                      num_workers: int = 4,
                      dataset_weights: Optional[List[float]] = None,
                      debug: bool = False,
+                     preprocessed_hidden_states_dir: Optional[str] = None,
                      **dataset_kwargs) -> torch.utils.data.DataLoader:
     """
     创建数据加载器
@@ -530,6 +762,9 @@ def create_dataloader(json_paths: List[str],
     Returns:
         DataLoader: 数据加载器
     """
+    
+    if preprocessed_hidden_states_dir:
+        dataset_kwargs['preprocessed_hidden_states_dir'] = preprocessed_hidden_states_dir
     
     if len(json_paths) == 1:
         dataset = JSONAudioMotionDataset(json_paths[0], **dataset_kwargs)

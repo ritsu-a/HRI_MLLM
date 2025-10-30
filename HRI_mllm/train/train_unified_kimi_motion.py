@@ -126,10 +126,19 @@ class UnifiedModelTrainer:
         total_tokens = 0
         num_batches = 0
         
-        progress_bar = tqdm(self.train_dataloader, desc=f"Epoch {self.epoch}")
+        # 只在主进程或非分布式模式显示进度条
+        if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+            progress_bar = tqdm(self.train_dataloader, desc=f"Epoch {self.epoch}")
+        else:
+            progress_bar = self.train_dataloader
         
         # 梯度累积：只在第一个batch时清零梯度
         accumulation_count = 0
+        
+        # 打印开始信息（只在主进程）
+        if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+            print(f"\n🔄 Starting epoch {self.epoch}...")
+            print(f"   Dataloader has {len(self.train_dataloader)} batches")
         
         for batch_idx, batch in enumerate(progress_bar):
             # 验证batch数据
@@ -205,7 +214,8 @@ class UnifiedModelTrainer:
                     motion_tokens=batch.get('motion_tokens'),
                     interleaved_sequences=interleaved_sequences,
                     attention_mask=attention_masks,
-                    labels=token_labels
+                    labels=token_labels,
+                    batch=batch  # 传递整个batch以访问预处理的hidden states
                 )
                 
                 # 计算损失（除以累积步数，使得梯度平均）
@@ -480,20 +490,14 @@ def parse_args():
                        help='Motion token loss权重（默认1.0，更高）')
     parser.add_argument('--audio_loss_weight', type=float, default=0.1,
                        help='Audio token loss权重（默认0.1，较低）')
-    parser.add_argument('--lora_r', type=int, default=16,
-                       help='LoRA rank（默认16）')
-    parser.add_argument('--lora_alpha', type=int, default=32,
-                       help='LoRA alpha缩放因子（默认32）')
-    parser.add_argument('--lora_dropout', type=float, default=0.1,
-                       help='LoRA dropout率（默认0.1）')
     
     # 保存和日志参数
     parser.add_argument('--save_dir', type=str, default="output/unified_model",
                        help='模型保存目录')
     parser.add_argument('--save_every', type=int, default=100,
                        help='保存间隔步数（已弃用，保留用于兼容）')
-    parser.add_argument('--save_every_epochs', type=int, default=2,
-                       help='每N个epoch保存一次（默认2）')
+    parser.add_argument('--save_every_epochs', type=int, default=50,
+                       help='每N个epoch保存一次（默认50）')
     parser.add_argument('--resume_from', type=str, default=None,
                        help='从检查点恢复训练')
     
@@ -508,6 +512,10 @@ def parse_args():
                        help='使用wandb记录')
     parser.add_argument('--wandb_project', type=str, default="unified-kimi-motion",
                        help='wandb项目名称')
+    parser.add_argument('--preprocessed_hidden_states_dir', type=str, default=None,
+                       help='预处理hidden states目录路径（如果提供，将使用预处理的hidden states加速训练）')
+    parser.add_argument('--adaptor_checkpoint_path', type=str, default=None,
+                       help='预训练adaptor的checkpoint路径（如果提供，将加载预训练权重）')
     
     return parser.parse_args()
 
@@ -554,16 +562,28 @@ def main():
     
     # 初始化wandb（只在主进程）
     if args.use_wandb and is_main_process:
-        wandb.init(
-            project=args.wandb_project,
-            config=vars(args),
-            name=f"unified_model_{int(time.time())}"
-        )
-        print("✅ Wandb initialized")
+        try:
+            wandb.init(
+                project=args.wandb_project,
+                config=vars(args),
+                name=f"unified_model_{int(time.time())}",
+                mode="offline"  # 设置为offline模式，避免login卡住
+            )
+            print("✅ Wandb initialized (offline mode)")
+        except Exception as e:
+            print(f"⚠️  Failed to initialize wandb: {e}")
+            print("   Continuing without wandb logging...")
+            args.use_wandb = False  # 禁用wandb，避免后续错误
     
     # 创建模型
     if is_main_process:
         print("🔄 Creating unified model...")
+    
+    # 如果使用了预处理的hidden states，可以选择跳过Kimi模型加载以节省显存
+    skip_kimi_model = args.preprocessed_hidden_states_dir is not None and os.path.exists(args.preprocessed_hidden_states_dir)
+    if skip_kimi_model and is_main_process:
+        print("💡 Using preprocessed hidden states - will skip Kimi model loading to save GPU memory")
+    
     model = create_unified_model(
         kimi_model_path=args.kimi_model_path,
         gpt2_config_path=args.gpt2_config_path,
@@ -572,11 +592,14 @@ def main():
         train_mixer_only=args.train_mixer_only,
         motion_loss_weight=args.motion_loss_weight,
         audio_loss_weight=args.audio_loss_weight,
-        lora_r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
-        debug=args.debug
+        debug=args.debug,
+        skip_kimi_model=skip_kimi_model,
+        adaptor_checkpoint_path=args.adaptor_checkpoint_path,
+        preprocessed_hidden_states_dir=args.preprocessed_hidden_states_dir
     )
+    
+    if args.adaptor_checkpoint_path and is_main_process:
+        print(f"✅ Using pre-trained adaptor from: {args.adaptor_checkpoint_path}")
     model.to(device)  # 确保模型在正确的设备上
     
     # 创建数据加载器
@@ -593,16 +616,35 @@ def main():
         debug=args.debug,
         max_audio_length=args.max_audio_length,
         max_motion_length=args.max_motion_length,
-        interleave_ratio=tuple(args.interleave_ratio)
+        interleave_ratio=tuple(args.interleave_ratio),
+        preprocessed_hidden_states_dir=args.preprocessed_hidden_states_dir
     )
+    
+    if args.preprocessed_hidden_states_dir and is_main_process:
+        print(f"✅ Using preprocessed hidden states from: {args.preprocessed_hidden_states_dir}")
+        print(f"   This will significantly speed up training by skipping Kimi model forward pass")
+    
+    # 测试数据加载器（加载第一个batch以验证是否工作正常）
+    # 注意：如果num_workers > 0，在多进程环境下测试可能会卡住
+    # 所以我们跳过这个测试，直接进入训练
+    if is_main_process:
+        print(f"✅ Data loader created successfully")
+        print(f"   - Dataset length: {len(train_dataloader.dataset) if hasattr(train_dataloader, 'dataset') else 'N/A'}")
+        print(f"   - Number of batches: {len(train_dataloader)}")
+        print(f"   - Num workers: {args.num_workers}")
+        if args.num_workers > 0:
+            print(f"   ⚠️  Note: With num_workers > 0, first batch loading may take a moment")
     
     # 如果是分布式训练，需要包装DataLoader
     if world_size > 1:
         # 注意：create_dataloader返回的dataloader需要重新创建以使用DistributedSampler
         # 这里简化处理：假设create_dataloader内部会处理分布式情况
         # 如果不行，需要修改create_dataloader以支持DistributedSampler
-        pass
-    
+        if is_main_process:
+            print("🔄 Distributed training detected, waiting for all processes to sync...")
+        # 同步所有进程
+        if world_size > 1:
+            dist.barrier()
     
     # 如果是分布式训练，包装模型
     if world_size > 1:
@@ -614,6 +656,8 @@ def main():
             output_device=local_rank,
             find_unused_parameters=True  # 因为只训练部分参数
         )
+        if is_main_process:
+            print("✅ Model wrapped with DDP")
     
     # 创建训练器（传入模型，trainer内部会处理DDP包装）
     if is_main_process:
@@ -634,6 +678,16 @@ def main():
     if args.resume_from and is_main_process:
         print(f"🔄 Resuming from checkpoint: {args.resume_from}")
         trainer.load_checkpoint(args.resume_from)
+    
+    # 开始训练前的最后检查
+    if is_main_process:
+        print("=" * 80)
+        print("🚀 Starting training...")
+        print("=" * 80)
+        print(f"   - Total epochs: {args.num_epochs}")
+        print(f"   - Dataloader length: {len(train_dataloader)} batches per epoch")
+        print(f"   - Effective batch size: {args.batch_size * args.gradient_accumulation_steps * world_size}")
+        print("=" * 80)
     
     # 开始训练
     trainer.train(

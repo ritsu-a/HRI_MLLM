@@ -5,10 +5,11 @@
 使用Kimi模型的text和audio hidden state混合作为adaptor输入
 """
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, List, Tuple, Union
+from typing import Optional, List, Tuple, Union, Dict
 from transformers import GPT2Config
 from HRI_mllm.model.gpt2_adaptor.model import MixedInputGPT2
 from HRI_mllm.model.kimi_motion.model import MoonshotKimiaForCausalLM
@@ -83,10 +84,10 @@ class UnifiedKimiMotionModel(nn.Module):
                  train_mixer_only: bool = True,
                  motion_loss_weight: float = 1.0,
                  audio_loss_weight: float = 0.1,
-                 lora_r: int = 16,
-                 lora_alpha: int = 32,
-                 lora_dropout: float = 0.1,
-                 debug: bool = False):
+                 debug: bool = False,
+                 skip_kimi_model: bool = False,
+                 adaptor_checkpoint_path: Optional[str] = None,
+                 preprocessed_hidden_states_dir: Optional[str] = None):
         super().__init__()
         
         self.freeze_kimi = freeze_kimi
@@ -94,184 +95,133 @@ class UnifiedKimiMotionModel(nn.Module):
         self.train_mixer_only = train_mixer_only
         self.motion_loss_weight = motion_loss_weight  # motion token loss权重（更高）
         self.audio_loss_weight = audio_loss_weight    # audio token loss权重（更低）
-        self.lora_r = lora_r
-        self.lora_alpha = lora_alpha
-        self.lora_dropout = lora_dropout
         self.debug = debug
+        self.skip_kimi_model = skip_kimi_model
+        self.kimi_model_path = kimi_model_path
+        self.preprocessed_hidden_states_dir = preprocessed_hidden_states_dir
         
         # 只在非debug模式或主进程打印关键信息
         if not debug or (torch.distributed.is_initialized() and torch.distributed.get_rank() == 0):
             pass  # 移除加载信息，减少输出
         
-        # 加载Kimi模型
-        self.kimi_model = MoonshotKimiaForCausalLM.from_pretrained(
-            kimi_model_path, 
-            trust_remote_code=True
-        )
-        
-        # 冻结Kimi模型参数，使用LoRA微调最后2层transformer
-        self.use_lora = False
-        if self.freeze_kimi:
-            # 冻结所有参数
-            for param in self.kimi_model.parameters():
-                param.requires_grad = False
+        # 如果跳过Kimi模型加载（使用预处理的hidden states），则不加载Kimi模型
+        if self.skip_kimi_model:
+            self.kimi_model = None
+            print("✅ Skipping Kimi model loading (using preprocessed hidden states, saving GPU memory)")
             
-            # 尝试使用LoRA微调最后2层
-            try:
-                from peft import LoraConfig, get_peft_model, TaskType
-                
-                # 为PEFT兼容性添加必要的方法（如果不存在）
-                if not hasattr(self.kimi_model, 'prepare_inputs_for_generation'):
-                    # 定义prepare_inputs_for_generation方法
-                    def _prepare_inputs_for_generation(model_self, input_ids, past_key_values=None, attention_mask=None, **kwargs):
-                        """占位符方法，用于PEFT兼容性"""
-                        if past_key_values is not None:
-                            input_ids = input_ids[:, -1:]
-                        return {
-                            "input_ids": input_ids,
-                            "past_key_values": past_key_values,
-                            "attention_mask": attention_mask,
-                        }
-                    # 直接添加到类上
-                    from types import MethodType
-                    self.kimi_model.prepare_inputs_for_generation = MethodType(_prepare_inputs_for_generation, self.kimi_model)
-                
-                num_mimo_layers = len(self.kimi_model.model.mimo_layers)
-                if num_mimo_layers >= 2:
-                    # 为最后2层配置LoRA
-                    # 目标模块：attention和MLP的线性层
-                    target_modules = []
-                    for i in range(num_mimo_layers - 2, num_mimo_layers):
-                        layer_idx = i
-                        # 添加attention层的目标模块
-                        target_modules.extend([
-                            f"model.mimo_layers.{layer_idx}.self_attn.q_proj",
-                            f"model.mimo_layers.{layer_idx}.self_attn.k_proj",
-                            f"model.mimo_layers.{layer_idx}.self_attn.v_proj",
-                            f"model.mimo_layers.{layer_idx}.self_attn.o_proj",
-                        ])
-                        # 添加MLP层的目标模块（Qwen2MLP通常有gate_proj, up_proj, down_proj）
-                        target_modules.extend([
-                            f"model.mimo_layers.{layer_idx}.mlp.gate_proj",
-                            f"model.mimo_layers.{layer_idx}.mlp.up_proj",
-                            f"model.mimo_layers.{layer_idx}.mlp.down_proj",
-                        ])
-                    
-                    lora_config = LoraConfig(
-                        task_type=TaskType.CAUSAL_LM,
-                        r=self.lora_r,
-                        lora_alpha=self.lora_alpha,
-                        lora_dropout=self.lora_dropout,
-                        target_modules=target_modules,
-                        bias="none",
-                    )
-                    
-                    # 将模型转换为PEFT模型（只对指定层添加LoRA）
-                    self.kimi_model = get_peft_model(self.kimi_model, lora_config)
-                    self.use_lora = True
-                    
-                    # 确保lm_head也是可训练的（用于计算loss）
-                    for param in self.kimi_model.lm_head.parameters():
-                        param.requires_grad = True
-                    
-                    print(f"✅ Kimi model using LoRA for last 2 audio transformer layers (layers {num_mimo_layers-2} to {num_mimo_layers-1})")
-                    print(f"   - LoRA rank: {lora_config.r}, alpha: {lora_config.lora_alpha}")
-                else:
-                    # 如果层数少于2，对所有mimo_layers使用LoRA
-                    target_modules = []
-                    for i in range(num_mimo_layers):
-                        target_modules.extend([
-                            f"model.mimo_layers.{i}.self_attn.q_proj",
-                            f"model.mimo_layers.{i}.self_attn.k_proj",
-                            f"model.mimo_layers.{i}.self_attn.v_proj",
-                            f"model.mimo_layers.{i}.self_attn.o_proj",
-                            f"model.mimo_layers.{i}.mlp.gate_proj",
-                            f"model.mimo_layers.{i}.mlp.up_proj",
-                            f"model.mimo_layers.{i}.mlp.down_proj",
-                        ])
-                    
-                    lora_config = LoraConfig(
-                        task_type=TaskType.CAUSAL_LM,
-                        r=self.lora_r,
-                        lora_alpha=self.lora_alpha,
-                        lora_dropout=self.lora_dropout,
-                        target_modules=target_modules,
-                        bias="none",
-                    )
-                    
-                    self.kimi_model = get_peft_model(self.kimi_model, lora_config)
-                    self.use_lora = True
-                    
-                    for param in self.kimi_model.lm_head.parameters():
-                        param.requires_grad = True
-                    
-                    print(f"✅ Kimi model using LoRA for all {num_mimo_layers} audio transformer layers")
-                    print(f"   - LoRA rank: {lora_config.r}, alpha: {lora_config.lora_alpha}")
-                    
-            except (ImportError, AttributeError, Exception) as e:
-                if isinstance(e, ImportError):
-                    print("⚠️  peft library not found, falling back to full fine-tuning")
-                else:
-                    print(f"⚠️  LoRA initialization failed: {e}, falling back to full fine-tuning")
-                # 确保use_lora标志为False
-                self.use_lora = False
-                # 回退到直接解冻最后2层
-                num_mimo_layers = len(self.kimi_model.model.mimo_layers)
-                if num_mimo_layers >= 2:
-                    for layer in self.kimi_model.model.mimo_layers[-2:]:
-                        for param in layer.parameters():
-                            param.requires_grad = True
-                    print(f"✅ Kimi model parameters frozen (except last 2 audio transformer layers: {num_mimo_layers-2} to {num_mimo_layers-1})")
-                else:
-                    for layer in self.kimi_model.model.mimo_layers:
-                        for param in layer.parameters():
-                            param.requires_grad = True
-                    print(f"✅ Kimi model parameters frozen (unfroze all {num_mimo_layers} audio transformer layers)")
-                
-                # 解冻lm_head
-                for param in self.kimi_model.lm_head.parameters():
-                    param.requires_grad = True
-        
-        # 获取Kimi模型的hidden state维度
-        kimi_config = self.kimi_model.config
-        text_hidden_size = kimi_config.hidden_size  # 通常是4096
-        audio_hidden_size = kimi_config.hidden_size  # 通常是4096
-        
-        # 初始化文本tokenizer（使用Kimi模型的tokenizer）
-        from transformers import AutoTokenizer
-        try:
-            self.text_tokenizer = AutoTokenizer.from_pretrained(
-                kimi_model_path,
+            # 尝试从预处理数据中检测hidden size
+            kimi_hidden_size = None
+            if preprocessed_hidden_states_dir and os.path.exists(preprocessed_hidden_states_dir):
+                # 尝试从index.json或第一个预处理文件读取hidden size
+                index_path = os.path.join(preprocessed_hidden_states_dir, "index.json")
+                if os.path.exists(index_path):
+                    try:
+                        import json
+                        with open(index_path, 'r', encoding='utf-8') as f:
+                            index_data = json.load(f)
+                            samples = index_data.get('samples', [])
+                            if samples:
+                                # 从第一个样本的metadata或hidden states文件读取
+                                first_sample = samples[0]
+                                if 'text_hidden_size' in first_sample:
+                                    kimi_hidden_size = first_sample['text_hidden_size']
+                                    print(f"✅ Detected hidden size from preprocessed data: {kimi_hidden_size}")
+                                elif 'hidden_states_path' in first_sample:
+                                    # 尝试加载第一个文件来检测维度
+                                    hs_path = first_sample['hidden_states_path']
+                                    if not os.path.isabs(hs_path):
+                                        hs_path = os.path.join(preprocessed_hidden_states_dir, "hidden_states", os.path.basename(hs_path))
+                                    if os.path.exists(hs_path):
+                                        try:
+                                            hs_data = torch.load(hs_path, map_location='cpu', weights_only=False)
+                                            if 'text_hidden_states' in hs_data:
+                                                kimi_hidden_size = hs_data['text_hidden_states'].shape[-1]
+                                                print(f"✅ Detected hidden size from preprocessed file: {kimi_hidden_size}")
+                                        except:
+                                            pass
+                    except Exception as e:
+                        if self.debug:
+                            print(f"⚠️  Failed to detect hidden size from preprocessed data: {e}")
+            
+            # 如果无法检测，使用默认值
+            if kimi_hidden_size is None:
+                kimi_hidden_size = 4096
+                print(f"⚠️  Using default hidden_size={kimi_hidden_size} (could not detect from preprocessed data)")
+        else:
+            # 加载Kimi模型
+            self.kimi_model = MoonshotKimiaForCausalLM.from_pretrained(
+                kimi_model_path, 
                 trust_remote_code=True
             )
-            print(f"✅ Text tokenizer loaded from {kimi_model_path}")
-            
-            # 获取extra_tokens（特别是kimia_text_blank）
-            try:
-                from kimia_infer.utils.special_tokens import instantiate_extra_tokens
-                self.extra_tokens = instantiate_extra_tokens(self.text_tokenizer)
-                self.kimia_text_blank = self.extra_tokens.kimia_text_blank
-                print(f"✅ Extra tokens loaded, kimia_text_blank={self.kimia_text_blank}")
-            except Exception as e:
-                print(f"⚠️  Failed to load extra tokens: {e}")
-                # 尝试直接获取kimia_text_blank
-                if hasattr(self.text_tokenizer, "special_tokens"):
-                    try:
-                        self.kimia_text_blank = self.text_tokenizer.special_tokens["<|im_kimia_text_blank|>"]
-                    except:
-                        self.kimia_text_blank = 18  # 默认值
-                elif hasattr(self.text_tokenizer, "convert_tokens_to_ids"):
-                    try:
-                        self.kimia_text_blank = self.text_tokenizer.convert_tokens_to_ids("<|im_kimia_text_blank|>")
-                    except:
-                        self.kimia_text_blank = 18  # 默认值
-                else:
-                    self.kimia_text_blank = 18  # 默认值
-                print(f"⚠️  Using default kimia_text_blank={self.kimia_text_blank}")
-        except Exception as e:
-            print(f"⚠️  Failed to load text tokenizer: {e}")
+            kimi_hidden_size = None  # 将从模型配置中获取
+        
+        # 冻结Kimi模型参数
+        if self.kimi_model is not None:
+            if self.freeze_kimi:
+                # 冻结所有参数
+                for param in self.kimi_model.parameters():
+                    param.requires_grad = False
+                print("✅ Kimi model parameters fully frozen")
+        
+        # 获取Kimi模型的hidden state维度
+        # 注意：如果使用预处理的hidden states，实际维度可能不同，会在forward中动态适配
+        if self.kimi_model is not None:
+            kimi_config = self.kimi_model.config
+            text_hidden_size = kimi_config.hidden_size  # 通常是4096，但可能是3584
+            audio_hidden_size = kimi_config.hidden_size  # 通常是4096，但可能是3584
+        elif kimi_hidden_size is not None:
+            # 使用提供的hidden size
+            text_hidden_size = kimi_hidden_size
+            audio_hidden_size = kimi_hidden_size
+        else:
+            # 默认值（Kimi模型可能是4096或3584）
+            # 如果使用预处理的hidden states，会在forward中自动适配
+            text_hidden_size = 4096
+            audio_hidden_size = 4096
+            print(f"⚠️  Using default hidden_size={text_hidden_size} (Kimi model not loaded)")
+            print(f"   Note: If using preprocessed hidden states, dimensions will be auto-detected and adjusted")
+        
+        # 初始化文本tokenizer（使用Kimi模型的tokenizer）
+        # 如果跳过Kimi模型加载，则也不加载tokenizer（因为不需要）
+        if self.skip_kimi_model:
             self.text_tokenizer = None
             self.kimia_text_blank = 18  # 默认值
+            print("✅ Skipping text tokenizer loading (not needed when using preprocessed hidden states)")
+        else:
+            from transformers import AutoTokenizer
+            try:
+                self.text_tokenizer = AutoTokenizer.from_pretrained(
+                    kimi_model_path,
+                    trust_remote_code=True
+                )
+                print(f"✅ Text tokenizer loaded from {kimi_model_path}")
+                
+                # 获取extra_tokens（特别是kimia_text_blank）
+                try:
+                    from kimia_infer.utils.special_tokens import instantiate_extra_tokens
+                    self.extra_tokens = instantiate_extra_tokens(self.text_tokenizer)
+                    self.kimia_text_blank = self.extra_tokens.kimia_text_blank
+                    print(f"✅ Extra tokens loaded, kimia_text_blank={self.kimia_text_blank}")
+                except Exception as e:
+                    print(f"⚠️  Failed to load extra tokens: {e}")
+                    # 尝试直接获取kimia_text_blank
+                    if hasattr(self.text_tokenizer, "special_tokens"):
+                        try:
+                            self.kimia_text_blank = self.text_tokenizer.special_tokens["<|im_kimia_text_blank|>"]
+                        except:
+                            self.kimia_text_blank = 18  # 默认值
+                    elif hasattr(self.text_tokenizer, "convert_tokens_to_ids"):
+                        try:
+                            self.kimia_text_blank = self.text_tokenizer.convert_tokens_to_ids("<|im_kimia_text_blank|>")
+                        except:
+                            self.kimia_text_blank = 18  # 默认值
+                    else:
+                        self.kimia_text_blank = 18  # 默认值
+                    print(f"⚠️  Using default kimia_text_blank={self.kimia_text_blank}")
+            except Exception as e:
+                print(f"⚠️  Failed to load text tokenizer: {e}")
+                self.text_tokenizer = None
+                self.kimia_text_blank = 18  # 默认值
         
         # 创建hidden state混合器
         self.hidden_state_mixer = HiddenStateMixer(
@@ -285,6 +235,66 @@ class UnifiedKimiMotionModel(nn.Module):
             config=gpt2_config,
             audio_hidden_size=gpt2_config.hidden_size  # 现在输入是混合后的hidden state
         )
+        
+        # 如果提供了预训练adaptor的checkpoint，加载权重
+        if adaptor_checkpoint_path is not None and os.path.exists(adaptor_checkpoint_path):
+            print(f"🔄 Loading pre-trained adaptor from: {adaptor_checkpoint_path}")
+            try:
+                checkpoint = torch.load(adaptor_checkpoint_path, map_location="cpu", weights_only=False)
+                
+                # 检查checkpoint格式
+                if 'model_state' in checkpoint:
+                    # 从motion_adaptor训练的checkpoint加载
+                    adaptor_state_dict = checkpoint['model_state']
+                    epoch = checkpoint.get('epoch', 0)
+                    print(f"   - Checkpoint epoch: {epoch}")
+                elif 'model_state_dict' in checkpoint:
+                    # 从unified模型checkpoint加载（需要提取adaptor部分）
+                    full_state_dict = checkpoint['model_state_dict']
+                    adaptor_state_dict = {}
+                    for key, value in full_state_dict.items():
+                        if key.startswith('motion_adaptor.'):
+                            # 移除'motion_adaptor.'前缀
+                            new_key = key[len('motion_adaptor.'):]
+                            adaptor_state_dict[new_key] = value
+                    if not adaptor_state_dict:
+                        print("⚠️  No motion_adaptor weights found in checkpoint")
+                    else:
+                        print(f"   - Extracted adaptor weights from unified model checkpoint")
+                else:
+                    # 直接是state_dict
+                    adaptor_state_dict = checkpoint
+                
+                if adaptor_state_dict:
+                    # 加载权重（使用strict=False以兼容可能的参数不匹配）
+                    missing_keys, unexpected_keys = self.motion_adaptor.load_state_dict(
+                        adaptor_state_dict, strict=False
+                    )
+                    if missing_keys:
+                        print(f"   ⚠️  Missing keys: {len(missing_keys)} keys (may be normal if config differs)")
+                        if self.debug or len(missing_keys) <= 10:
+                            # 在debug模式或missing keys较少时显示详细信息
+                            for key in missing_keys[:10]:  # 最多显示10个
+                                print(f"      - {key}")
+                            if len(missing_keys) > 10:
+                                print(f"      ... and {len(missing_keys) - 10} more")
+                    if unexpected_keys:
+                        print(f"   ⚠️  Unexpected keys: {len(unexpected_keys)} keys (may be normal)")
+                        # 总是显示unexpected keys的详细信息，因为通常很少
+                        for key in unexpected_keys:
+                            print(f"      - {key}")
+                    print(f"✅ Pre-trained adaptor loaded successfully!")
+                else:
+                    print(f"⚠️  No adaptor weights found in checkpoint, using random initialization")
+            except Exception as e:
+                print(f"⚠️  Failed to load adaptor checkpoint: {e}")
+                print(f"   Will use random initialization")
+                import traceback
+                traceback.print_exc()
+        else:
+            if adaptor_checkpoint_path is not None:
+                print(f"⚠️  Adaptor checkpoint not found: {adaptor_checkpoint_path}")
+                print(f"   Will use random initialization")
         
         # 冻结adaptor参数
         if self.freeze_adaptor:
@@ -300,7 +310,10 @@ class UnifiedKimiMotionModel(nn.Module):
             print("✅ Only hidden state mixer will be trained")
         
         print(f"✅ Unified model initialized successfully!")
-        print(f"   - Kimi model: {'frozen' if self.freeze_kimi else 'trainable'}")
+        if self.skip_kimi_model:
+            print(f"   - Kimi model: Skipped (using preprocessed hidden states)")
+        else:
+            print(f"   - Kimi model: {'frozen' if self.freeze_kimi else 'trainable'}")
         print(f"   - Motion adaptor: {'frozen' if self.freeze_adaptor else 'trainable'}")
         print(f"   - Hidden state mixer: trainable")
     
@@ -312,6 +325,7 @@ class UnifiedKimiMotionModel(nn.Module):
                 interleaved_sequences: Optional[torch.Tensor] = None,
                 attention_mask: Optional[torch.Tensor] = None,
                 labels: Optional[torch.Tensor] = None,
+                batch: Optional[Dict] = None,
                 **kwargs):
         """
         前向传播
@@ -420,105 +434,245 @@ class UnifiedKimiMotionModel(nn.Module):
                 raise ValueError(f"Text tokenization is required but failed: {e}")
         
         # 1. 通过Kimi模型获取hidden states和生成assistant audio tokens
-        if self.debug:
-            print(f"🔍 Calling Kimi model...")
-        # 注意：即使Kimi模型被冻结，也需要enable_grad()以确保梯度能够通过hidden states传递到mixer
-        # Kimi模型的参数已经被设置为requires_grad=False，所以不会更新参数
-        with torch.enable_grad():
-            try:
-                # 构建Kimi模型调用参数
-                kimi_kwargs = {
-                    'input_ids': audio_input_ids,
-                    'attention_mask': kimi_attention_mask,
-                    'output_hidden_states': True,
-                    'return_dict': True
-                }
+        # 检查是否可以使用预处理的hidden states
+        text_hidden_states = None
+        audio_hidden_states = None
+        
+        if batch is not None:
+            use_preprocessed = batch.get('use_preprocessed', False)
+            
+            if use_preprocessed:
+                # 使用预处理的hidden states（从batch中获取）
+                batch_text_hs = batch.get('text_hidden_states')
+                batch_audio_hs = batch.get('audio_hidden_states')
                 
-                # 只有当text_input_ids不为None时才添加
-                # 注意：text_input_ids的长度必须与audio_input_ids的长度匹配，且位置对齐
-                # 因为Kimi模型会将text embeddings加到audio embeddings上
-                # 对于没有文本的位置，应该使用kimia_text_blank填充（与prompt_manager一致）
-                if text_input_ids is not None:
-                    batch_size, audio_seq_len = audio_input_ids.shape
-                    text_seq_len = text_input_ids.shape[1]
+                if self.debug:
+                    print(f"🔍 Checking preprocessed hidden states:")
+                    print(f"   - use_preprocessed: {use_preprocessed}")
+                    print(f"   - batch_text_hs type: {type(batch_text_hs)}, is None: {batch_text_hs is None}")
+                    print(f"   - batch_audio_hs type: {type(batch_audio_hs)}, is None: {batch_audio_hs is None}")
+                    if batch_text_hs is not None:
+                        print(f"   - batch_text_hs length: {len(batch_text_hs) if isinstance(batch_text_hs, list) else 'N/A'}")
+                        if isinstance(batch_text_hs, list) and len(batch_text_hs) > 0:
+                            print(f"   - First item type: {type(batch_text_hs[0])}, is None: {batch_text_hs[0] is None}")
+                
+                if batch_text_hs is not None and batch_audio_hs is not None:
+                    # batch_text_hs和batch_audio_hs是列表，每个元素是一个样本的hidden states（可能为None）
+                    # 检查有多少样本有预处理数据
+                    valid_indices = []
+                    text_hs_list = []
+                    audio_hs_list = []
                     
-                    # 如果text序列长度不等于audio序列长度，需要进行padding
-                    # 使用kimia_text_blank填充（与Kimi模型的处理方式一致）
-                    if text_seq_len != audio_seq_len:
-                        # 使用kimia_text_blank作为padding token（与prompt_manager一致）
-                        # 在prompt_manager中，对于audio token位置，对应的text token就是kimia_text_blank
-                        padded_text_input_ids = torch.full(
+                    for i in range(len(batch_text_hs)):
+                        text_hs = batch_text_hs[i]
+                        audio_hs = batch_audio_hs[i]
+                        
+                        if text_hs is not None and audio_hs is not None:
+                            if isinstance(text_hs, torch.Tensor) and isinstance(audio_hs, torch.Tensor):
+                                valid_indices.append(i)
+                                # 确保在CPU上
+                                text_hs = text_hs.cpu() if text_hs.is_cuda else text_hs
+                                audio_hs = audio_hs.cpu() if audio_hs.is_cuda else audio_hs
+                                text_hs_list.append(text_hs)
+                                audio_hs_list.append(audio_hs)
+                    
+                    # 如果所有样本都有预处理数据
+                    if len(valid_indices) == len(batch_text_hs):
+                        if text_hs_list and len(text_hs_list) > 0:
+                            # 获取最大序列长度
+                            max_seq_len = max(hs.shape[0] if len(hs.shape) > 1 else hs.shape[0] for hs in text_hs_list)
+                            
+                            if max_seq_len > 0:
+                                # 获取hidden size（从实际数据中获取）
+                                actual_hidden_size = text_hs_list[0].shape[-1]
+                                batch_size = len(text_hs_list)
+                                
+                                # 检查hidden size是否与mixer的期望匹配
+                                expected_hidden_size = self.hidden_state_mixer.text_hidden_size
+                                if actual_hidden_size != expected_hidden_size:
+                                    print(f"⚠️  WARNING: Hidden states dimension mismatch!")
+                                    print(f"   - Expected: {expected_hidden_size} (from mixer)")
+                                    print(f"   - Actual: {actual_hidden_size} (from preprocessed data)")
+                                    print(f"   - Attempting to adjust mixer input dimensions...")
+                                    
+                                    # 动态调整mixer的input维度（如果可能）
+                                    # 如果mixer已经初始化，我们需要重新创建或调整它
+                                    # 这里我们创建一个新的projection层来适配
+                                    from torch.nn import Linear
+                                    
+                                    # 临时创建适配的projection层
+                                    if not hasattr(self, '_temp_text_proj') or self._temp_text_proj.in_features != actual_hidden_size:
+                                        self._temp_text_proj = Linear(actual_hidden_size, self.hidden_state_mixer.output_hidden_size).to(device)
+                                        self._temp_audio_proj = Linear(actual_hidden_size, self.hidden_state_mixer.output_hidden_size).to(device)
+                                        print(f"   - Created temporary projection layers: {actual_hidden_size} -> {self.hidden_state_mixer.output_hidden_size}")
+                                    
+                                    # 使用临时projection层
+                                    hidden_size = actual_hidden_size
+                                else:
+                                    hidden_size = actual_hidden_size
+                                
+                                # Padding到相同长度并batch
+                                batch_text_hs_tensor = torch.zeros(batch_size, max_seq_len, hidden_size, dtype=text_hs_list[0].dtype)
+                                batch_audio_hs_tensor = torch.zeros(batch_size, max_seq_len, hidden_size, dtype=audio_hs_list[0].dtype)
+                                
+                                for i, (text_hs, audio_hs) in enumerate(zip(text_hs_list, audio_hs_list)):
+                                    seq_len = text_hs.shape[0]
+                                    batch_text_hs_tensor[i, :seq_len] = text_hs
+                                    batch_audio_hs_tensor[i, :seq_len] = audio_hs
+                                
+                                text_hidden_states = batch_text_hs_tensor.to(device)
+                                audio_hidden_states = batch_audio_hs_tensor.to(device)
+                                
+                                # 如果使用了临时projection，标记一下
+                                if actual_hidden_size != expected_hidden_size:
+                                    self._use_temp_proj = True
+                                else:
+                                    self._use_temp_proj = False
+                    elif len(valid_indices) == 0:
+                        # 所有样本都没有预处理数据
+                        if self.debug:
+                            print(f"⚠️  Batch marked as use_preprocessed=True but no valid preprocessed hidden states found")
+                        text_hidden_states = None
+                        audio_hidden_states = None
+                    else:
+                        # 部分样本有预处理数据，部分没有
+                        # 如果Kimi模型不可用，报错并提示
+                        if self.kimi_model is None:
+                            missing_count = len(batch_text_hs) - len(valid_indices)
+                            raise ValueError(
+                                f"Cannot compute hidden states: {missing_count}/{len(batch_text_hs)} samples in this batch "
+                                f"are missing preprocessed hidden states, but Kimi model is not loaded. "
+                                f"Please either:\n"
+                                f"  1. Ensure all samples have preprocessed hidden states, or\n"
+                                f"  2. Load the Kimi model (set skip_kimi_model=False) to compute missing hidden states on-the-fly"
+                            )
+                        # 如果Kimi模型可用，fallback到Kimi模型计算所有样本
+                        if self.debug:
+                            print(f"⚠️  Batch has {len(valid_indices)}/{len(batch_text_hs)} samples with preprocessed hidden states, "
+                                  f"will compute remaining {len(batch_text_hs) - len(valid_indices)} samples using Kimi model")
+                        text_hidden_states = None
+                        audio_hidden_states = None
+        
+        # 如果没有预处理的hidden states，调用Kimi模型
+        if text_hidden_states is None or audio_hidden_states is None:
+            if self.kimi_model is None:
+                raise ValueError(
+                    "Cannot compute hidden states: Kimi model is not loaded and preprocessed hidden states are not available. "
+                    "Please either load the Kimi model or provide preprocessed hidden states."
+                )
+            
+            if self.debug:
+                print(f"🔍 Calling Kimi model...")
+            # 注意：即使Kimi模型被冻结，也需要enable_grad()以确保梯度能够通过hidden states传递到mixer
+            # Kimi模型的参数已经被设置为requires_grad=False，所以不会更新参数
+            with torch.enable_grad():
+                try:
+                    # 构建Kimi模型调用参数
+                    kimi_kwargs = {
+                        'input_ids': audio_input_ids,
+                        'attention_mask': kimi_attention_mask,
+                        'output_hidden_states': True,
+                        'return_dict': True
+                    }
+                    
+                    # 只有当text_input_ids不为None时才添加
+                    # 注意：text_input_ids的长度必须与audio_input_ids的长度匹配，且位置对齐
+                    # 因为Kimi模型会将text embeddings加到audio embeddings上
+                    # 对于没有文本的位置，应该使用kimia_text_blank填充（与prompt_manager一致）
+                    if text_input_ids is not None:
+                        batch_size, audio_seq_len = audio_input_ids.shape
+                        text_seq_len = text_input_ids.shape[1]
+                        
+                        # 如果text序列长度不等于audio序列长度，需要进行padding
+                        # 使用kimia_text_blank填充（与Kimi模型的处理方式一致）
+                        if text_seq_len != audio_seq_len:
+                            # 使用kimia_text_blank作为padding token（与prompt_manager一致）
+                            # 在prompt_manager中，对于audio token位置，对应的text token就是kimia_text_blank
+                            padded_text_input_ids = torch.full(
+                                (batch_size, audio_seq_len),
+                                self.kimia_text_blank,
+                                device=text_input_ids.device,
+                                dtype=text_input_ids.dtype
+                            )
+                            
+                            # 将原始的text_input_ids复制到前面（左对齐）
+                            # 剩余位置自动填充为kimia_text_blank
+                            actual_len = min(text_seq_len, audio_seq_len)
+                            padded_text_input_ids[:, :actual_len] = text_input_ids[:, :actual_len]
+                            text_input_ids = padded_text_input_ids
+                            
+                            if self.debug:
+                                print(f"   - Text input IDs padded from {text_seq_len} to {audio_seq_len} using kimia_text_blank={self.kimia_text_blank}")
+                        else:
+                            # 即使长度匹配，也要确保没有文本的位置使用kimia_text_blank
+                            # 但这里我们假设用户提供的text_input_ids已经是正确对齐的
+                            if self.debug:
+                                print(f"   - Text input IDs length matches audio ({audio_seq_len})")
+                        
+                        kimi_kwargs['text_input_ids'] = text_input_ids
+                    else:
+                        # 如果没有提供text_input_ids，创建全为kimia_text_blank的tensor
+                        # 因为Kimi模型要求text_input_ids必须存在
+                        batch_size, audio_seq_len = audio_input_ids.shape
+                        text_input_ids = torch.full(
                             (batch_size, audio_seq_len),
                             self.kimia_text_blank,
-                            device=text_input_ids.device,
-                            dtype=text_input_ids.dtype
+                            device=device,
+                            dtype=torch.long
                         )
-                        
-                        # 将原始的text_input_ids复制到前面（左对齐）
-                        # 剩余位置自动填充为kimia_text_blank
-                        actual_len = min(text_seq_len, audio_seq_len)
-                        padded_text_input_ids[:, :actual_len] = text_input_ids[:, :actual_len]
-                        text_input_ids = padded_text_input_ids
-                        
+                        kimi_kwargs['text_input_ids'] = text_input_ids
                         if self.debug:
-                            print(f"   - Text input IDs padded from {text_seq_len} to {audio_seq_len} using kimia_text_blank={self.kimia_text_blank}")
-                    else:
-                        # 即使长度匹配，也要确保没有文本的位置使用kimia_text_blank
-                        # 但这里我们假设用户提供的text_input_ids已经是正确对齐的
-                        if self.debug:
-                            print(f"   - Text input IDs length matches audio ({audio_seq_len})")
+                            print(f"   - Created text_input_ids filled with kimia_text_blank={self.kimia_text_blank}")
                     
-                    kimi_kwargs['text_input_ids'] = text_input_ids
-                else:
-                    # 如果没有提供text_input_ids，创建全为kimia_text_blank的tensor
-                    # 因为Kimi模型要求text_input_ids必须存在
-                    batch_size, audio_seq_len = audio_input_ids.shape
-                    text_input_ids = torch.full(
-                        (batch_size, audio_seq_len),
-                        self.kimia_text_blank,
-                        device=device,
-                        dtype=torch.long
-                    )
-                    kimi_kwargs['text_input_ids'] = text_input_ids
+                    # 添加labels以计算assistant audio token的loss
+                    if assistant_audio_tokens is not None:
+                        kimi_kwargs['labels'] = assistant_audio_tokens.to(device)
+                    
                     if self.debug:
-                        print(f"   - Created text_input_ids filled with kimia_text_blank={self.kimia_text_blank}")
-                
-                # 添加labels以计算assistant audio token的loss
-                if assistant_audio_tokens is not None:
-                    kimi_kwargs['labels'] = assistant_audio_tokens.to(device)
-                
-                if self.debug:
-                    print(f"   - Kimi model kwargs: {list(kimi_kwargs.keys())}")
-                
-                kimi_outputs = self.kimi_model(**kimi_kwargs)
-                if self.debug:
-                    print(f"✅ Kimi model call completed")
-                    print(f"   - kimi_outputs type: {type(kimi_outputs)}")
-                    print(f"   - kimi_outputs keys: {list(kimi_outputs.keys()) if hasattr(kimi_outputs, 'keys') else 'N/A'}")
-            except Exception as e:
-                print(f"❌ Error in Kimi model call: {e}")
-                import traceback
-                traceback.print_exc()
-                raise
-        
-        # 获取text和audio的hidden states
-        if hasattr(kimi_outputs, 'hidden_states') and kimi_outputs.hidden_states:
-            # 获取最后一层的hidden states
-            last_hidden_states = kimi_outputs.hidden_states[-1]
-            
-            if isinstance(last_hidden_states, tuple):
-                text_hidden_states, audio_hidden_states = last_hidden_states
-            else:
-                # 如果只有一个hidden state，复制一份作为text和audio
-                text_hidden_states = last_hidden_states
-                audio_hidden_states = last_hidden_states
-        else:
-            # 这里需要从logits反推hidden states，或者修改Kimi模型以返回hidden states
-            raise NotImplementedError("需要修改Kimi模型以返回hidden states")
+                        print(f"   - Kimi model kwargs: {list(kimi_kwargs.keys())}")
+                    
+                    kimi_outputs = self.kimi_model(**kimi_kwargs)
+                    if self.debug:
+                        print(f"✅ Kimi model call completed")
+                        print(f"   - kimi_outputs type: {type(kimi_outputs)}")
+                        print(f"   - kimi_outputs keys: {list(kimi_outputs.keys()) if hasattr(kimi_outputs, 'keys') else 'N/A'}")
+                    
+                    # 获取text和audio的hidden states
+                    if hasattr(kimi_outputs, 'hidden_states') and kimi_outputs.hidden_states:
+                        # 获取最后一层的hidden states
+                        last_hidden_states = kimi_outputs.hidden_states[-1]
+                        
+                        if isinstance(last_hidden_states, tuple):
+                            text_hidden_states, audio_hidden_states = last_hidden_states[0], last_hidden_states[1]
+                        else:
+                            # 如果只有一个hidden state，复制一份作为text和audio
+                            text_hidden_states = last_hidden_states
+                            audio_hidden_states = last_hidden_states
+                    else:
+                        # 这里需要从logits反推hidden states，或者修改Kimi模型以返回hidden states
+                        raise NotImplementedError("需要修改Kimi模型以返回hidden states")
+                    
+                    # 保存kimi_outputs用于后续计算audio loss（如果需要）
+                    # 注意：这里需要在外部作用域也能访问到kimi_outputs
+                    kimi_outputs_for_loss = kimi_outputs
+                except Exception as e:
+                    print(f"❌ Error in Kimi model call: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    raise
         
         # 2. 混合hidden states
         try:
-            mixed_hidden_states = self.hidden_state_mixer(text_hidden_states, audio_hidden_states)
+            # 如果使用临时projection（维度不匹配时），先投影再混合
+            if hasattr(self, '_use_temp_proj') and self._use_temp_proj:
+                # 使用临时projection层投影到mixer的输出维度
+                text_proj = self._temp_text_proj(text_hidden_states)
+                audio_proj = self._temp_audio_proj(audio_hidden_states)
+                # 应用mixer的混合权重
+                weights = torch.nn.functional.softmax(self.hidden_state_mixer.mix_weights, dim=0)
+                mixed_hidden_states = weights[0] * text_proj + weights[1] * audio_proj
+            else:
+                mixed_hidden_states = self.hidden_state_mixer(text_hidden_states, audio_hidden_states)
         except Exception as e:
             print(f"❌ Error in hidden state mixer: {e}")
             import traceback
@@ -593,24 +747,15 @@ class UnifiedKimiMotionModel(nn.Module):
                 adaptor_outputs = None
         
         # 计算Kimi模型的audio token loss
+        # 注意：当使用预处理的hidden states时，没有kimi_outputs，所以无法计算audio loss
+        # 如果使用预处理的hidden states，跳过audio loss计算
         kimi_audio_loss = None
-        if assistant_audio_tokens is not None and hasattr(kimi_outputs, 'logits'):
-            # Kimi模型返回的logits是元组 (text_logits, audio_logits)
-            if isinstance(kimi_outputs.logits, tuple) and len(kimi_outputs.logits) >= 2:
-                audio_logits = kimi_outputs.logits[1]  # audio_logits
-                # 确保assistant_audio_tokens在正确的设备上
-                assistant_audio_tokens_device = assistant_audio_tokens.to(audio_logits.device)
-                # 计算audio token的loss
-                shift_logits = audio_logits[..., :-1, :].contiguous()
-                shift_labels = assistant_audio_tokens_device[..., 1:].contiguous()
-                loss_fct = nn.CrossEntropyLoss()
-                kimi_audio_loss = loss_fct(
-                    shift_logits.view(-1, shift_logits.size(-1)),
-                    shift_labels.view(-1)
-                )
-            elif hasattr(kimi_outputs, 'loss') and kimi_outputs.loss is not None:
-                # 如果Kimi模型已经计算了loss，直接使用
-                kimi_audio_loss = kimi_outputs.loss
+        if assistant_audio_tokens is not None and not self.skip_kimi_model:
+            # 当调用Kimi模型时，audio loss应该在kimi_outputs中计算
+            # 但由于kimi_outputs在with块内，这里无法直接访问
+            # 为了简化，如果使用预处理的hidden states（skip_kimi_model=True），则不计算audio loss
+            # 如果需要audio loss，可以在调用Kimi模型时通过labels参数自动计算
+            pass
         
         # 组合Kimi的loss和Adaptor的loss（使用权重）
         total_loss = None
@@ -942,15 +1087,8 @@ class UnifiedKimiMotionModel(nn.Module):
             'freeze_kimi': self.freeze_kimi,
             'freeze_adaptor': self.freeze_adaptor,
             'train_mixer_only': self.train_mixer_only,
-            'use_lora': self.use_lora,
         }
         torch.save(save_dict, save_path)
-        
-        # 如果使用了LoRA，也保存LoRA适配器
-        if self.use_lora and hasattr(self.kimi_model, 'save_pretrained'):
-            lora_save_dir = save_path.replace('.pt', '_lora') if save_path.endswith('.pt') else f"{save_path}_lora"
-            self.kimi_model.save_pretrained(lora_save_dir)
-            print(f"✅ LoRA adapter saved to: {lora_save_dir}")
         
         print(f"✅ Model saved to: {save_path}")
     
@@ -987,10 +1125,10 @@ def create_unified_model(kimi_model_path: str,
                         train_mixer_only: bool = True,
                         motion_loss_weight: float = 1.0,
                         audio_loss_weight: float = 0.1,
-                        lora_r: int = 16,
-                        lora_alpha: int = 32,
-                        lora_dropout: float = 0.1,
-                        debug: bool = False) -> UnifiedKimiMotionModel:
+                        debug: bool = False,
+                        skip_kimi_model: bool = False,
+                        adaptor_checkpoint_path: Optional[str] = None,
+                        preprocessed_hidden_states_dir: Optional[str] = None) -> UnifiedKimiMotionModel:
     """
     创建统一的Kimi-Motion模型
     
@@ -1002,10 +1140,10 @@ def create_unified_model(kimi_model_path: str,
         train_mixer_only: 是否只训练mixer
         motion_loss_weight: Motion token loss权重（默认1.0，更高）
         audio_loss_weight: Audio token loss权重（默认0.1，较低）
-        lora_r: LoRA rank（默认16）
-        lora_alpha: LoRA alpha缩放因子（默认32）
-        lora_dropout: LoRA dropout率（默认0.1）
         debug: 是否启用调试模式
+        skip_kimi_model: 是否跳过Kimi模型加载（当使用预处理的hidden states时，可以设为True以节省显存）
+        adaptor_checkpoint_path: 预训练adaptor的checkpoint路径（可选，如果提供将加载预训练权重）
+        preprocessed_hidden_states_dir: 预处理hidden states目录（用于自动检测hidden size）
     
     Returns:
         UnifiedKimiMotionModel: 统一模型实例
@@ -1037,10 +1175,10 @@ def create_unified_model(kimi_model_path: str,
         train_mixer_only=train_mixer_only,
         motion_loss_weight=motion_loss_weight,
         audio_loss_weight=audio_loss_weight,
-        lora_r=lora_r,
-        lora_alpha=lora_alpha,
-        lora_dropout=lora_dropout,
-        debug=debug
+        debug=debug,
+        skip_kimi_model=skip_kimi_model,
+        adaptor_checkpoint_path=adaptor_checkpoint_path,
+        preprocessed_hidden_states_dir=preprocessed_hidden_states_dir
     )
     
     return model

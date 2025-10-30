@@ -16,7 +16,7 @@ NUM_GPUS=8
 # 8卡训练参数（根据显存调整，降低以避免OOM）
 BATCH_SIZE_PER_GPU=1  # 每个GPU的batch size（降低以减少显存）
 GRADIENT_ACCUMULATION_STEPS=4  # 梯度累积步数，有效batch size = BATCH_SIZE_PER_GPU * GRADIENT_ACCUMULATION_STEPS * NUM_GPUS = 32
-NUM_EPOCHS=500
+NUM_EPOCHS=1000
 LEARNING_RATE=1e-4
 
 # 根据显存调整最大长度（降低序列长度以减少显存）
@@ -42,7 +42,7 @@ echo "✅ Data files check completed"
 mkdir -p "$SAVE_DIR"
 
 # 构建训练命令（使用torchrun进行多卡训练）
-TRAIN_CMD="torchrun --nproc_per_node=$NUM_GPUS --master_port=29500"
+TRAIN_CMD="torchrun --nproc_per_node=$NUM_GPUS --master_port=29501"
 TRAIN_CMD="$TRAIN_CMD HRI_mllm/train/train_unified_kimi_motion.py"
 TRAIN_CMD="$TRAIN_CMD --kimi_model_path $KIMI_MODEL_PATH"
 TRAIN_CMD="$TRAIN_CMD --train_json_paths ${TRAIN_JSON_PATHS[*]}"
@@ -59,18 +59,27 @@ TRAIN_CMD="$TRAIN_CMD --save_every_epochs 2"
 TRAIN_CMD="$TRAIN_CMD --use_wandb"
 TRAIN_CMD="$TRAIN_CMD --wandb_project unified-kimi-motion"
 
+# 预处理hidden states目录（如果存在，将使用预处理的hidden states加速训练）
+# 取消注释下面这一行以使用预处理的hidden states：
+PREPROCESSED_HIDDEN_STATES_DIR="data/preprocessed_hidden_states/BEAT_v2_kimi"
+if [ -n "$PREPROCESSED_HIDDEN_STATES_DIR" ]; then
+    TRAIN_CMD="$TRAIN_CMD --preprocessed_hidden_states_dir $PREPROCESSED_HIDDEN_STATES_DIR"
+fi
+
 TRAIN_CMD="$TRAIN_CMD --freeze_kimi"
 TRAIN_CMD="$TRAIN_CMD --freeze_adaptor"
 TRAIN_CMD="$TRAIN_CMD --train_mixer_only"
 
+# 预训练adaptor checkpoint路径
+ADAPTOR_CHECKPOINT_PATH="/root/workspace/HRI_MLLM/output/motion_adaptor_10_v4/kimi_audio_motion_gpt2_brainco_30_100/checkpoints/epoch_500.pt"
+if [ -n "$ADAPTOR_CHECKPOINT_PATH" ] && [ -f "$ADAPTOR_CHECKPOINT_PATH" ]; then
+    TRAIN_CMD="$TRAIN_CMD --adaptor_checkpoint_path $ADAPTOR_CHECKPOINT_PATH"
+    echo "✅ Using pre-trained adaptor: $ADAPTOR_CHECKPOINT_PATH"
+fi
+
 # Loss权重配置（motion token更重要）
 TRAIN_CMD="$TRAIN_CMD --motion_loss_weight 1.0"
 TRAIN_CMD="$TRAIN_CMD --audio_loss_weight 0.1"
-
-# LoRA配置（用于微调Kimi模型最后2层，保持原始性能）
-TRAIN_CMD="$TRAIN_CMD --lora_r 16"
-TRAIN_CMD="$TRAIN_CMD --lora_alpha 32"
-TRAIN_CMD="$TRAIN_CMD --lora_dropout 0.1"
 
 # 打印训练配置
 echo "🚀 Starting Unified Kimi-Motion Model Training (8 GPUs)"
@@ -87,11 +96,13 @@ echo "   - Learning Rate: $LEARNING_RATE"
 echo "   - Max Audio Length: $MAX_AUDIO_LENGTH"
 echo "   - Max Motion Length: $MAX_MOTION_LENGTH"
 echo "   - Interleave Ratio: 1:1"
-echo "   - Freeze Kimi: True (using LoRA for last 2 layers)"
+echo "   - Freeze Kimi: True"
 echo "   - Freeze Adaptor: True"
 echo "   - Train Mixer Only: True"
+if [ -n "$ADAPTOR_CHECKPOINT_PATH" ] && [ -f "$ADAPTOR_CHECKPOINT_PATH" ]; then
+    echo "   - Pre-trained Adaptor: $ADAPTOR_CHECKPOINT_PATH"
+fi
 echo "   - Loss Weights: motion=1.0, audio=0.1"
-echo "   - LoRA Config: r=16, alpha=32, dropout=0.1"
 echo ""
 
 # 执行训练
