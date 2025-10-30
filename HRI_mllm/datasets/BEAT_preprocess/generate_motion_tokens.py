@@ -102,7 +102,8 @@ if __name__ == "__main__":
                        help="Path to VQ-VAE checkpoint (default: from config)")
     parser.add_argument("--model_name_or_path", type=str, default="moonshotai/Kimi-Audio-7B")
     parser.add_argument("--data_dirs", type=str, nargs='+', 
-                       default=["BEAT_v2_kimi", "internet_data_v1_kimi", "1025_60_60fps_kimi"])
+                       default=["SG_2_or_3_long_sentence_1030_en_kimi"],
+                       help="List of data directories to process.")
     parser.add_argument("--motion_subdir", type=str, default="new_joint_vecs")
     parser.add_argument("--audio_subdir", type=str, default=None)
     parser.add_argument("--output_subdir", type=str, default="tokens")
@@ -198,10 +199,19 @@ if __name__ == "__main__":
             if os.path.exists(fps_audio_dir):
                 audio_dirs.append(fps_audio_dir)
         
+        # 3. 支持SG_2_or_3_long_sentence_1030_en_kimi自动音频处理
+        if "SG_2_or_3_long_sentence_1030_en_kimi" in data_dir_name:
+            sg_audio_dir = os.path.join(DATA_ROOT, "SG_2_or_3_long_sentence_1030_en")
+            if os.path.exists(sg_audio_dir):
+                audio_dirs.append(sg_audio_dir)
+           
+        
         # 3. 尝试BEAT原始位置
-        beat_audio_dir = os.path.join(DATA_ROOT, "BEAT_v2")
-        if os.path.exists(beat_audio_dir):
-            audio_dirs.append(beat_audio_dir)
+        if "BEAT" in data_dir_name:
+
+            beat_audio_dir = os.path.join(DATA_ROOT, "BEAT_v2")
+            if os.path.exists(beat_audio_dir):
+                audio_dirs.append(beat_audio_dir)
         
         if not audio_dirs:
             print(f"⚠️  No audio directory found")
@@ -252,12 +262,11 @@ if __name__ == "__main__":
                     
                     target_length = len(audio_tokens)
                     
-                    # 根据数据集选择窗口大小
-                    # BEAT: 256, SeG: 64, internet: 256
-                    if "beat" in data_dir_name.lower() or "internet" in data_dir_name.lower():
-                        window_size = 256
-                    else:
+                    # window_size兼容，仅seg为64
+                    if "seg" in data_dir_name.lower():
                         window_size = 64
+                    else:
+                        window_size = 256
                     
                     # 编码动作数据
                     motion_data = np.load(motion_path)

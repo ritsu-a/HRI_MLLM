@@ -98,6 +98,40 @@ class JSONLAudioMotionDataset(Dataset):
         self.stats['generated_samples'] += 1
         self.stats['max_length'] = max(self.stats['max_length'], len(sub_seq))
     
+    def pool_and_concat_samples(self, sep_token):
+        max_seq = self.config.max_seq_length
+        pad_token = self.SEQ_PAD_TOKEN
+        processed_samples = []
+        cur_seq, cur_mask = [], []
+        for idx, item in enumerate(self.samples):
+            seq = item['tokens'].tolist()
+            mask = item['mask'].tolist()
+            valid_len = item['seq_length']
+            data = seq[:valid_len]
+            mask_data = mask[:valid_len]
+            # 若加本样本+1分隔后超max，先flush已有
+            if cur_seq and len(cur_seq) + 1 + len(data) > max_seq:
+                pad_needed = max_seq - len(cur_seq)
+                padded = cur_seq + [pad_token]*pad_needed
+                padded_mask = cur_mask + [0]*pad_needed
+                processed_samples.append({'tokens': torch.tensor(padded), 'mask': torch.tensor(padded_mask), 'seq_length': len(cur_seq)})
+                cur_seq, cur_mask = [], []
+            # 每个样本段前加分割符
+            if cur_seq:  # 非开头才加
+                cur_seq.append(sep_token)
+                cur_mask.append(0)
+            cur_seq.extend(data)
+            cur_mask.extend(mask_data)
+        # flush最后一批
+        if cur_seq:
+            pad_needed = max_seq - len(cur_seq)
+            padded = cur_seq + [pad_token]*pad_needed
+            padded_mask = cur_mask + [0]*pad_needed
+            processed_samples.append({'tokens': torch.tensor(padded), 'mask': torch.tensor(padded_mask), 'seq_length': len(cur_seq)})
+        self.samples = processed_samples
+    
+    # 删除 pool_and_concat_samples 相关调用，不做预处理拼接
+    
     def __len__(self):
         return len(self.samples)
     
@@ -116,9 +150,9 @@ parser.add_argument('--epochs', type=int, default=300,
                    help='Number of epochs to train')
 args = parser.parse_args()
 
-exp_name = "kimi_audio_motion_gpt2_brainco_30_100"
-os.makedirs(os.path.join("output/motion_adaptor_v4", exp_name), exist_ok=True)
-os.makedirs(os.path.join("output/motion_adaptor_v4", exp_name, "checkpoints"), exist_ok=True)
+exp_name = "kimi_audio_motion_gpt2_brainco_synthetic_en"
+os.makedirs(os.path.join("output/motion_adaptor_v5", exp_name), exist_ok=True)
+os.makedirs(os.path.join("output/motion_adaptor_v5", exp_name, "checkpoints"), exist_ok=True)
 
 os.environ["WANDB_MODE"] = "offline"
 
@@ -141,7 +175,8 @@ else:
 # JSONL文件路径 - 每个数据集独立的jsonl文件
 all_jsonl_files = {
     "BEAT": "/root/workspace/HRI_MLLM/data/BEAT_v2_kimi_tokens.jsonl",
-    "internet": "/root/workspace/HRI_MLLM/data/internet_data_v1_kimi_tokens.jsonl"
+    "internet": "/root/workspace/HRI_MLLM/data/internet_data_v1_kimi_tokens.jsonl",
+    "SG_2_or_3_long_sentence_1030_en_kimi_tokens": "/root/workspace/HRI_MLLM/data/SG_2_or_3_long_sentence_1030_en_kimi_tokens.jsonl",
 }
 
 # 根据命令行参数选择数据集
@@ -177,7 +212,7 @@ if local_rank == 0:
             "total_vocab_size": 512*2 + 10,
             "max_seq_length": 4096,
             "min_seq_length": 128,
-            "batch_size": 8,
+            "batch_size": 64,
             "learning_rate": 1e-4,
             "epochs": args.epochs,  # 使用命令行参数
             "sliding_window_step": 32,
@@ -195,7 +230,7 @@ else:
         "total_vocab_size": 512*2 + 10,
         "max_seq_length": 4096,
         "min_seq_length": 128,
-        "batch_size": 8,
+        "batch_size": 64,
         "learning_rate": 1e-4,
         "epochs": args.epochs,  # 使用命令行参数
         "sliding_window_step": 32,
@@ -329,6 +364,30 @@ def collate_fn(batch):
     lengths = torch.tensor([item['seq_length'] for item in batch])
     return {'tokens': tokens, 'mask': masks, 'lengths': lengths}
 
+def dynamic_collate_fn(batch, max_seq_length=None):
+    """每批自动找最长序列padding，支持max_seq_length截断"""
+    tokens = [item['tokens'] for item in batch]
+    mask = [item['mask'] for item in batch]
+    seq_lengths = [item['seq_length'] for item in batch]
+    L_max = max(seq_lengths)
+    if max_seq_length is not None:
+        L_max = min(L_max, max_seq_length)
+    batch_tokens = []
+    batch_mask = []
+    for t,m,l in zip(tokens,mask,seq_lengths):
+        t = t[:L_max]
+        m = m[:L_max]
+        # padding
+        if t.shape[0] < L_max:
+            pad_num = L_max-t.shape[0]
+            t = torch.cat([t, torch.full((pad_num,), t[-1].item() if t.shape[0]>0 else 0, dtype=t.dtype)])
+            m = torch.cat([m, torch.zeros(pad_num, dtype=m.dtype)])
+        batch_tokens.append(t)
+        batch_mask.append(m)
+    batch_tokens = torch.stack(batch_tokens)
+    batch_mask = torch.stack(batch_mask)
+    return {'tokens': batch_tokens, 'mask': batch_mask, 'seq_length': torch.tensor(seq_lengths)}
+
 # 只在分布式模式下使用DistributedSampler
 if world_size > 1:
     sampler = DistributedSampler(
@@ -439,7 +498,7 @@ for epoch in range(start_epoch, config.epochs):
         print(f"Epoch {epoch+1}/{config.epochs} | Loss: {avg_loss:.4f}")
         
         if (epoch + 1) % 50 == 0:
-            ckpt_path = f"output/motion_adaptor_v4/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
+            ckpt_path = f"output/motion_adaptor_v5/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
             # 在DDP模式下使用model.module，否则直接使用model
             model_to_save = model.module if world_size > 1 else model
             torch.save({
@@ -453,7 +512,7 @@ for epoch in range(start_epoch, config.epochs):
 if local_rank == 0:
     # 在DDP模式下使用model.module，否则直接使用model
     model_to_save = model.module if world_size > 1 else model
-    model_to_save.save_pretrained(f"output/motion_adaptor_v4/{config.exp_name}")
+    model_to_save.save_pretrained(f"output/motion_adaptor_v5/{config.exp_name}")
 
 if world_size > 1:
     dist.destroy_process_group()

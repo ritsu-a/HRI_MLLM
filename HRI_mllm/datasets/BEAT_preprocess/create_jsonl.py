@@ -190,7 +190,7 @@ def process_dataset(data_dir, dataset_name, output_file, user_prompt):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Create jsonl files from token data')
     parser.add_argument("--datasets", type=str, nargs='+', 
-                       default=["BEAT_v2_kimi", "internet_data_v1_kimi"],
+                       default=["SG_2_or_3_long_sentence_1030_en_kimi"],
                        help="List of datasets to process")
     parser.add_argument("--output_dir", type=str, default=None,
                        help="Output directory for jsonl files (default: DATA_ROOT)")
