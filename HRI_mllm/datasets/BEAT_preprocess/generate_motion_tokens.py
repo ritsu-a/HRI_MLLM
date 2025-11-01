@@ -102,7 +102,7 @@ if __name__ == "__main__":
                        help="Path to VQ-VAE checkpoint (default: from config)")
     parser.add_argument("--model_name_or_path", type=str, default="moonshotai/Kimi-Audio-7B")
     parser.add_argument("--data_dirs", type=str, nargs='+', 
-                       default=["SG_2_or_3_long_sentence_1030_en_kimi"],
+                       default=["single_motion_sentence_version2_kimi"],
                        help="List of data directories to process.")
     parser.add_argument("--motion_subdir", type=str, default="new_joint_vecs")
     parser.add_argument("--audio_subdir", type=str, default=None)
@@ -204,6 +204,11 @@ if __name__ == "__main__":
             sg_audio_dir = os.path.join(DATA_ROOT, "SG_2_or_3_long_sentence_1030_en")
             if os.path.exists(sg_audio_dir):
                 audio_dirs.append(sg_audio_dir)
+
+        if "single_motion_sentence_version2_kimi" in data_dir_name:
+            single_motion_sentence_audio_dir = os.path.join(DATA_ROOT, "single_motion_sentence_version2")
+            if os.path.exists(single_motion_sentence_audio_dir):
+                audio_dirs.append(single_motion_sentence_audio_dir)
            
         
         # 3. 尝试BEAT原始位置

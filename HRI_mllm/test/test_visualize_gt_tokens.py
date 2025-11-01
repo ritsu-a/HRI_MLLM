@@ -78,7 +78,7 @@ def decode_motion_tokens(motion_tokens, motion_vae, mean_t, std_t, expected_fram
 
 # Parse arguments
 parser = argparse.ArgumentParser(description='Visualize ground truth tokens from jsonl')
-parser.add_argument('--jsonl_path', type=str, default='/root/workspace/HRI_MLLM/data/SG_2_or_3_long_sentence_1030_en_kimi_tokens.jsonl',
+parser.add_argument('--jsonl_path', type=str, default='/root/workspace/HRI_MLLM/data/single_motion_sentence_version2_kimi_tokens.jsonl',
                    help='Path to the jsonl file containing tokens')
 parser.add_argument('--vqvae_config', type=str, default='g1_vqvae_arbitrary_length_balanced.yaml',
                    help='VQ-VAE config file name')
@@ -156,7 +156,7 @@ for idx, line_idx in enumerate(sample_indices):
     # ground truth motion查找和保存
     from pathlib import Path
     audio_filename = Path(audio_path).stem
-    npy_path = f"/root/workspace/HRI_MLLM/data/SG_2_or_3_long_sentence_1030_en_kimi/new_joint_vecs/{audio_filename}.npy"
+    npy_path = f"/root/workspace/HRI_MLLM/data/single_motion_sentence_version2_kimi/new_joint_vecs/{audio_filename}.npy"
     found_original = False
     if os.path.exists(npy_path):
         orig_data = np.load(npy_path)

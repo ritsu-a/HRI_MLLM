@@ -10,10 +10,10 @@ echo "🔧 激活qwen环境..."
 source /root/anaconda3/bin/activate qwen
 
 # 设置参数
-JSONL_PATH="/root/workspace/HRI_MLLM/data/BEAT_v2_kimi_tokens.jsonl"
-GPT2_MODEL_PATH="/root/workspace/HRI_MLLM/output/motion_adaptor_10_v4/kimi_audio_motion_gpt2_brainco_30_100/checkpoints/epoch_500.pt"
+JSONL_PATH="/root/workspace/HRI_MLLM/data/single_motion_sentence_version2_kimi_tokens.jsonl"
+GPT2_MODEL_PATH="/root/workspace/HRI_MLLM/output/motion_adaptor_v5/kimi_audio_motion_gpt2_brainco_synthetic_en/checkpoints/epoch_1000.pt"
 OUTPUT_DIR="./mode_comparison_test"
-NUM_SAMPLES=3  # 对比3个样本
+NUM_SAMPLES=30  # 对比3个样本
 MAX_NEW_TOKENS=4096
 
 echo "📁 输出目录: $OUTPUT_DIR"
@@ -28,7 +28,10 @@ python visualize_training_reconstruction.py \
     --output_dir "$OUTPUT_DIR" \
     --num_samples $NUM_SAMPLES \
     --max_new_tokens $MAX_NEW_TOKENS \
-    --compare_modes
+    --compare_modes \
+    --temperature 0.8 \
+    --top_k 50 \
+    --repetition_penalty 1.8
 
 echo "✅ 对比测试完成！"
 echo "📂 结果保存在: $OUTPUT_DIR"

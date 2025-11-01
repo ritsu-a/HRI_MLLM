@@ -132,8 +132,7 @@ def process_dataset(data_dir, dataset_name, output_file, user_prompt):
             wav_path = find_audio_file(base_name, data_dir, dataset_name)
             if wav_path is None:
                 # 如果找不到音频文件，尝试从目录中提取
-                for audio_dir in [os.path.join(DATA_ROOT, "BEAT_v2"), 
-                                 os.path.join(DATA_ROOT, "internet_data_1021")]:
+                for audio_dir in [os.path.join(DATA_ROOT, "single_motion_sentence_version2")]:
                     if os.path.exists(audio_dir):
                         wav_path = os.path.join(audio_dir, base_name + '.wav')
                         if os.path.exists(wav_path):
@@ -190,7 +189,7 @@ def process_dataset(data_dir, dataset_name, output_file, user_prompt):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Create jsonl files from token data')
     parser.add_argument("--datasets", type=str, nargs='+', 
-                       default=["SG_2_or_3_long_sentence_1030_en_kimi"],
+                       default=["single_motion_sentence_version2_kimi"],
                        help="List of datasets to process")
     parser.add_argument("--output_dir", type=str, default=None,
                        help="Output directory for jsonl files (default: DATA_ROOT)")
