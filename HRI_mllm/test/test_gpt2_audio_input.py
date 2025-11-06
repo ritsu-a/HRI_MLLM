@@ -1,4 +1,5 @@
-### streaming demo for qwen2_5omni_motion
+### streaming demo for qwen2_5omni_motion with direct audio input
+### Based on test_gpt2_text_response.py, modified to accept direct audio file input
 ### HRI_mllm/model/qwen2_5omni_motion/monkey_patch_generate.py for monkey patching the generate function to support token-level streaming
 
 # Set MuJoCo to use EGL rendering (headless)
@@ -45,7 +46,9 @@ import torch
 torch.cuda.set_device(0)
 
 
-question = "What do you usually do on weekends?"
+# 直接使用音频文件作为输入
+audio_input_path = "/root/workspace/HRI_MLLM/data/beat_english_v0.2.1/1/1_wayne_0_1_1.wav"
+user_text_instruction = "Please repeat the following spoken content."
 
 
 def tts(text, save_path):
@@ -67,8 +70,6 @@ def tts(text, save_path):
         print(f"✅ 已保存:{save_path}")
     else:
         print("⚠️ 生成音频失败: audio_bytes 为空")
-
-
 
 
 ### loading kimi
@@ -93,18 +94,15 @@ sampling_params = {
 
 
 
-
-
-
 def generate_motion_tokens(model, audio_tokens, device="cuda", max_new_tokens=256, 
                          temperature=0.8, top_k=50, repetition_penalty=1.1):
     """
     使用GPT2 adaptor模型生成motion tokens
-    参考visualize_training_reconstruction.py的_free_generation实现
+    支持special token的处理，确保训练与测试结构一致
     
     Args:
         model: GPT2 adaptor模型
-        audio_tokens: 音频token序列
+        audio_tokens: 音频token序列（不包含special token）
         device: 设备
         max_new_tokens: 最大新生成token数量
         temperature: 温度参数
@@ -112,21 +110,35 @@ def generate_motion_tokens(model, audio_tokens, device="cuda", max_new_tokens=25
         repetition_penalty: 重复惩罚
     
     Returns:
-        generated_motion_tokens: 生成的motion token序列
+        generated_motion_tokens: 生成的motion token序列（已过滤special token，可直接用于VQ-VAE）
     """
     model.eval()
     
+    # 获取special token ID（从模型配置中）
+    gesture_start_token_id = getattr(model.config, 'gesture_start_token_id', 512*2 + 2)
+    audio_gesture_start_token_id = getattr(model.config, 'audio_gesture_start_token_id', 512*2 + 3)
+    gesture_end_token_id = getattr(model.config, 'gesture_end_token_id', 512*2 + 4)
+    audio_gesture_end_token_id = getattr(model.config, 'audio_gesture_end_token_id', 512*2 + 5)
+    
+    # 定义所有special token ID
+    special_token_ids = {
+        gesture_start_token_id,
+        audio_gesture_start_token_id,
+        gesture_end_token_id,
+        audio_gesture_end_token_id
+    }
+    
     print(f"Input audio tokens length: {len(audio_tokens)}")
     print(f"Audio tokens range: [{min(audio_tokens)}, {max(audio_tokens)}]")
+    print(f"Special token IDs: {special_token_ids}")
     
-    generated_motion_tokens = []
-    current_seq = []
-    token_labels = []
-    generated_history = []
+    generated_motion_tokens = []  # 用于VQ-VAE的纯motion tokens（已过滤special token）
+    current_seq = []  # 当前序列（包含special token，用于模型推理）
+    token_labels = []  # token类型标签
+    generated_history = []  # 生成历史（用于重复惩罚）
     
     interleave_audios, interleave_motions = 1, 1  # 从训练配置中获取
-    code_num = 512  # motion token vocabulary size
-    motion_token_count = 0  # 总的motion token计数
+    motion_token_count = 0  # 总的motion token计数（不包括special token）
     
     with torch.no_grad():
         for i, audio_token in enumerate(audio_tokens):
@@ -152,16 +164,15 @@ def generate_motion_tokens(model, audio_tokens, device="cuda", max_new_tokens=25
                         print(f"     序列长度: {len(current_seq)}")
                         print(f"     Audio tokens数量: {len(audio_tokens_in_input)}, 范围: [{min(audio_tokens_in_input) if audio_tokens_in_input else 'N/A'}, {max(audio_tokens_in_input) if audio_tokens_in_input else 'N/A'}]")
                         print(f"     Motion tokens数量: {len(motion_tokens_in_input)}, 范围: [{min(motion_tokens_in_input) if motion_tokens_in_input else 'N/A'}, {max(motion_tokens_in_input) if motion_tokens_in_input else 'N/A'}]")
-                        print(f"     输入tokens范围: [{inputs.min().item()}, {inputs.max().item()}]")
                     
                     # 调用模型forward方法
                     output = model(input_data=inputs, attention_mask=attn_mask, labels=labels)
                     next_token_logits = output.logits[0, -1, :]
                     
-                    # 应用重复惩罚
+                    # 应用重复惩罚（只对非special token应用）
                     if repetition_penalty != 1.0 and generated_history:
                         for token_id in set(generated_history):
-                            if token_id < next_token_logits.size(-1):  # 防止索引越界
+                            if token_id not in special_token_ids and token_id < next_token_logits.size(-1):
                                 next_token_logits[token_id] = next_token_logits[token_id] / repetition_penalty
                     
                     # 应用temperature
@@ -177,36 +188,66 @@ def generate_motion_tokens(model, audio_tokens, device="cuda", max_new_tokens=25
                     probs = torch.softmax(next_token_logits, dim=-1)
                     next_token = torch.multinomial(probs, 1).item()
                     
-                    # 确保motion token在正确范围内
-                    # GPT2模型的vocab_size是1034，所以motion token应该在[0, 1033]范围内
-                    # 偶数次 motion（body）∈ [0, 511]；奇数次 motion（hand）∈ [512, 1023]
-                    if motion_token_count % 2 == 0:
-                        # body token [0, 511]
-                        next_token = int(next_token % 512)
+                    # 处理special token：根据训练时的规则补充对应的token
+                    tokens_to_add = []  # 要添加到序列的tokens（包括补充的token）
+                    tokens_labels_to_add = []  # 对应的labels
+                    
+                    if next_token == gesture_start_token_id:
+                        # 模型预测了gesture_start，按照训练规则补充audio_gesture_start
+                        print(f"  🔵 检测到gesture_start token ({gesture_start_token_id})，补充audio_gesture_start")
+                        tokens_to_add.append(gesture_start_token_id)
+                        tokens_labels_to_add.append(gesture_start_token_id)  # motion类型
+                        tokens_to_add.append(audio_gesture_start_token_id)
+                        tokens_labels_to_add.append(-100)  # audio类型
+                        # 注意：gesture_start和audio_gesture_start都不添加到generated_motion_tokens（VQ-VAE不需要）
+                        
+                    elif next_token == gesture_end_token_id:
+                        # 模型预测了gesture_end，按照训练规则补充audio_gesture_end
+                        print(f"  🔴 检测到gesture_end token ({gesture_end_token_id})，补充audio_gesture_end")
+                        tokens_to_add.append(gesture_end_token_id)
+                        tokens_labels_to_add.append(gesture_end_token_id)  # motion类型
+                        tokens_to_add.append(audio_gesture_end_token_id)
+                        tokens_labels_to_add.append(-100)  # audio类型
+                        # 注意：gesture_end和audio_gesture_end都不添加到generated_motion_tokens（VQ-VAE不需要）
+                        
+                    elif next_token in special_token_ids:
+                        # 其他special token（audio_gesture_start或audio_gesture_end）
+                        # 这些应该是模型自动生成的补充token，直接添加
+                        tokens_to_add.append(next_token)
+                        tokens_labels_to_add.append(-100)  # audio类型
+                        # 不添加到generated_motion_tokens
+                        
                     else:
-                        # hand token [512, 1023]
-                        next_token = int(512 + (next_token % 512))
+                        # 普通motion token
+                        # 确保motion token在正确范围内
+                        vocab_size = model.config.vocab_size
+                        if next_token >= vocab_size:
+                            print(f"⚠️  警告: motion token {next_token} >= vocab_size {vocab_size}, 调整为 {vocab_size - 1}")
+                            next_token = vocab_size - 1
+                        
+                        # 对于motion token，根据奇偶性调整范围（可选，如果模型已经输出正确范围）
+                        # 这里保持原样，因为模型应该已经学会了正确的范围
+                        
+                        tokens_to_add.append(next_token)
+                        tokens_labels_to_add.append(next_token)  # motion token对应的label为自身
+                        
+                        # 添加到generated_motion_tokens（用于VQ-VAE）
+                        generated_motion_tokens.append(next_token)
+                        motion_token_count += 1
+                        
+                        # 添加到生成历史（用于重复惩罚）
+                        generated_history.append(next_token)
                     
-                    # 确保不超过vocab_size范围（额外安全检查）
-                    vocab_size = model.config.vocab_size
-                    if next_token >= vocab_size:
-                        print(f"⚠️  警告: motion token {next_token} >= vocab_size {vocab_size}, 调整为 {vocab_size - 1}")
-                        next_token = vocab_size - 1
-                    
-                    motion_token_count += 1
-                    
-                    generated_motion_tokens.append(next_token)
-                    generated_history.append(next_token)
+                    # 将生成的token添加到当前序列（用于后续推理）
+                    for token, label in zip(tokens_to_add, tokens_labels_to_add):
+                        current_seq.append(token)
+                        token_labels.append(label)
                     
                     # 保持历史记录长度
                     if len(generated_history) > 100:
                         generated_history = generated_history[-100:]
                     
-                    # 添加到当前序列
-                    current_seq.append(next_token)
-                    token_labels.append(next_token)  # motion token对应的label为自身
-                    
-                    # 检查是否达到最大motion token数量
+                    # 检查是否达到最大motion token数量（只计算实际motion token）
                     if len(generated_motion_tokens) >= max_new_tokens:
                         break
                 
@@ -214,9 +255,16 @@ def generate_motion_tokens(model, audio_tokens, device="cuda", max_new_tokens=25
                 if len(generated_motion_tokens) >= max_new_tokens:
                     break
     
-    print(f"Generated motion tokens length: {len(generated_motion_tokens)}")
+    print(f"\n📊 生成统计:")
+    print(f"   Generated motion tokens (for VQ-VAE): {len(generated_motion_tokens)}")
     if generated_motion_tokens:
-        print(f"Generated motion tokens range: [{min(generated_motion_tokens)}, {max(generated_motion_tokens)}]")
+        print(f"   Motion tokens range: [{min(generated_motion_tokens)}, {max(generated_motion_tokens)}]")
+    
+    # 过滤掉所有special token（额外安全检查）
+    filtered_tokens = [t for t in generated_motion_tokens if t not in special_token_ids]
+    if len(filtered_tokens) != len(generated_motion_tokens):
+        print(f"⚠️  过滤了 {len(generated_motion_tokens) - len(filtered_tokens)} 个special token")
+        generated_motion_tokens = filtered_tokens
     
     return generated_motion_tokens
 
@@ -224,10 +272,10 @@ def generate_motion_tokens(model, audio_tokens, device="cuda", max_new_tokens=25
 def decode_motion_tokens(motion_tokens, motion_vae, mean_t, std_t, expected_frames=None):
     """
     解码motion tokens为motion features
-    参考visualize_training_reconstruction.py的decode_motion_tokens实现
+    注意：motion_tokens应该已经过滤掉所有special token（由generate_motion_tokens处理）
     
     Args:
-        motion_tokens: List of motion tokens [body1, hand1, body2, hand2, ...]
+        motion_tokens: List of motion tokens [body1, hand1, body2, hand2, ...]（已过滤special token）
         motion_vae: The motion VQ-VAE model
         mean_t: Mean tensor for denormalization
         std_t: Std tensor for denormalization
@@ -236,6 +284,13 @@ def decode_motion_tokens(motion_tokens, motion_vae, mean_t, std_t, expected_fram
     Returns:
         data_dict: Decoded motion data in pkl format
     """
+    # 额外安全检查：过滤掉任何可能的special token（以防万一）
+    special_token_ids = {512*2 + 2, 512*2 + 3, 512*2 + 4, 512*2 + 5}  # gesture_start, audio_gesture_start, gesture_end, audio_gesture_end
+    filtered_tokens = [t for t in motion_tokens if t not in special_token_ids]
+    if len(filtered_tokens) != len(motion_tokens):
+        print(f"⚠️  decode_motion_tokens: 过滤了 {len(motion_tokens) - len(filtered_tokens)} 个special token")
+        motion_tokens = filtered_tokens
+    
     # Separate body and hand tokens
     # motion_tokens are alternating: [body, hand, body, hand, ...]
     if len(motion_tokens) % 2 != 0:
@@ -250,16 +305,36 @@ def decode_motion_tokens(motion_tokens, motion_vae, mean_t, std_t, expected_fram
     body_tokens = motion_tokens[0::2]  # even indices
     hand_tokens = motion_tokens[1::2]  # odd indices
     
-    # Convert to tensors
-    body_tokens = torch.tensor(body_tokens).unsqueeze(0).to("cuda")
-    # hand tokens need to subtract 512 offset
-    hand_tokens = torch.tensor(hand_tokens).unsqueeze(0).to("cuda") - 512
+    # 验证和修正token范围
+    # Body tokens应该在[0, 511]范围内
+    body_tokens = [max(0, min(511, int(t))) for t in body_tokens]
     
-    print(f"Body tokens shape: {body_tokens.shape}, range: [{body_tokens.min()}, {body_tokens.max()}]")
-    print(f"Hand tokens shape: {hand_tokens.shape}, range: [{hand_tokens.min()}, {hand_tokens.max()}]")
+    # Hand tokens应该在[512, 1023]范围内（在减去512之前）
+    # 修正超出范围的hand tokens
+    corrected_hand_tokens = []
+    for t in hand_tokens:
+        t_int = int(t)
+        if t_int < 512:
+            # 如果小于512，假设模型输出的是[0, 511]范围，需要加上512
+            corrected_hand_tokens.append(512 + (t_int % 512))
+        elif t_int > 1023:
+            # 如果大于1023，限制到[512, 1023]
+            corrected_hand_tokens.append(512 + (t_int % 512))
+        else:
+            corrected_hand_tokens.append(t_int)
+    hand_tokens = corrected_hand_tokens
+    
+    # Convert to tensors
+    body_tokens_tensor = torch.tensor(body_tokens).unsqueeze(0).to("cuda")
+    # hand tokens need to subtract 512 offset
+    hand_tokens_tensor = torch.tensor(hand_tokens).unsqueeze(0).to("cuda") - 512
+    
+    print(f"Body tokens shape: {body_tokens_tensor.shape}, range: [{body_tokens_tensor.min()}, {body_tokens_tensor.max()}]")
+    print(f"Hand tokens shape: {hand_tokens_tensor.shape}, range: [{hand_tokens_tensor.min()}, {hand_tokens_tensor.max()}]")
+    print(f"Hand tokens (before offset): {hand_tokens[:5]}... (should be in [512, 1023])")
     
     # Decode using VAE - this returns normalized features
-    decoded = motion_vae.decode((body_tokens, hand_tokens))
+    decoded = motion_vae.decode((body_tokens_tensor, hand_tokens_tensor))
     
     print(f"Decoded shape before truncation: {decoded.shape}")
     
@@ -359,6 +434,12 @@ def load_gpt2_from_checkpoint(checkpoint_path, device="cuda"):
         attn_pdrop=0.1,
     )
     
+    # 添加special token ID到模型配置（与训练时保持一致）
+    model_config.gesture_start_token_id = 512*2 + 2
+    model_config.audio_gesture_start_token_id = 512*2 + 3
+    model_config.gesture_end_token_id = 512*2 + 4
+    model_config.audio_gesture_end_token_id = 512*2 + 5
+    
     # 创建模型实例
     model = MixedInputGPT2(model_config, audio_hidden_size=3584)
     
@@ -372,6 +453,10 @@ def load_gpt2_from_checkpoint(checkpoint_path, device="cuda"):
     model.eval()
     model.to(device)
     print(f"✅ GPT2 adaptor model loaded successfully from checkpoint!")
+    print(f"   Special token IDs: gesture_start={model_config.gesture_start_token_id}, "
+          f"audio_gesture_start={model_config.audio_gesture_start_token_id}, "
+          f"gesture_end={model_config.gesture_end_token_id}, "
+          f"audio_gesture_end={model_config.audio_gesture_end_token_id}")
     return model
 
 
@@ -382,6 +467,14 @@ def load_gpt2_from_transformers(model_path, device="cuda"):
     # 加载配置
     config_path = os.path.join(model_path, "config.json")
     config = AutoConfig.from_pretrained(config_path)
+    
+    # 确保special token ID存在（如果config中没有，使用默认值）
+    if not hasattr(config, 'gesture_start_token_id'):
+        config.gesture_start_token_id = 512*2 + 2
+        config.audio_gesture_start_token_id = 512*2 + 3
+        config.gesture_end_token_id = 512*2 + 4
+        config.audio_gesture_end_token_id = 512*2 + 5
+        print("⚠️  Special token IDs not found in config, using default values")
     
     # 创建模型实例
     model = MixedInputGPT2(config, audio_hidden_size=3584)
@@ -398,6 +491,10 @@ def load_gpt2_from_transformers(model_path, device="cuda"):
     model.eval()
     model.to(device)
     print(f"✅ GPT2 adaptor model loaded successfully from transformers format!")
+    print(f"   Special token IDs: gesture_start={config.gesture_start_token_id}, "
+          f"audio_gesture_start={config.audio_gesture_start_token_id}, "
+          f"gesture_end={config.gesture_end_token_id}, "
+          f"audio_gesture_end={config.audio_gesture_end_token_id}")
     return model
 
 # 加载motion adaptor模型（可以根据需要修改路径）
@@ -449,22 +546,34 @@ print(f"✅ VQ-VAE model loaded successfully!")
 
 
 
-### generate text response
-tts_save_path = "/root/pengyang/codebase/HRI_MLLM/tts_output.wav"
-tts(question, tts_save_path)
-# audio2audio
+### 使用音频输入生成motion
+print(f"\n🎵 使用音频文件作为输入: {audio_input_path}")
+print(f"📝 用户指令: {user_text_instruction}")
+
+# 检查音频文件是否存在
+if not os.path.exists(audio_input_path):
+    print(f"❌ 错误: 音频文件不存在: {audio_input_path}")
+    raise FileNotFoundError(f"Audio file not found: {audio_input_path}")
+
+# 构建messages，包含用户文本和音频
 messages = [
     {
         "role": "user",
+        "message_type": "text",
+        "content": user_text_instruction,
+    },
+    {
+        "role": "user",
         "message_type": "audio",
-        "content": tts_save_path,
+        "content": audio_input_path,
     }
 ]
 
-
+print("\n🔄 开始生成音频和motion...")
 wav, audio_tokens, text = kimi_model.generate(messages, **sampling_params, output_type="both")
 
 ## Use a local HuggingFace model to inference.
+
 
 
 
@@ -489,7 +598,7 @@ sf.write("audio.wav", wav.detach().cpu().view(-1).numpy(), 24000)
 print("\n🎬 开始生成可视化视频...")
 vis_audio_motion(
     "llm.csv", 
-    output_path="final_output_llm_text_response.mp4", 
+    output_path="final_output_llm_audio_input.mp4", 
     audio_path="audio.wav", 
     robot_type="g1_brainco", 
     rate_limit=False, 
@@ -500,4 +609,5 @@ print(f"\n🎉 处理完成!")
 print(f"   - Motion pkl: llm.pkl")
 print(f"   - Motion csv: llm.csv")
 print(f"   - Audio: audio.wav")
-print(f"   - 可视化视频: final_output_llm_text_response.mp4")
+print(f"   - 可视化视频: final_output_llm_audio_input.mp4")
+

@@ -434,8 +434,17 @@ class JSONAudioMotionDataset(Dataset):
                                         result['text_hidden_states'] = text_hs
                                         result['audio_hidden_states'] = audio_hs
                                         result['use_preprocessed'] = True
+                                        
+                                        # 如果存在target_hidden_states，也加载
+                                        if 'target_hidden_states' in hidden_states_data:
+                                            target_hs = hidden_states_data['target_hidden_states']
+                                            if isinstance(target_hs, torch.Tensor) and len(target_hs.shape) == 2:
+                                                result['target_hidden_states'] = target_hs
+                                        
                                         if self.debug:
                                             print(f"✅ Loaded preprocessed hidden states for sample {sample_idx}: text_hs shape={text_hs.shape}, audio_hs shape={audio_hs.shape}")
+                                            if 'target_hidden_states' in result:
+                                                print(f"   - target_hidden_states shape={result['target_hidden_states'].shape}")
                         except Exception as e:
                             if self.debug:
                                 print(f"⚠️  Failed to load preprocessed hidden states for sample {sample_idx} from {hidden_states_path}: {e}")
@@ -538,6 +547,7 @@ def collate_fn(batch: List[Dict[str, Any]], debug: bool = False) -> Dict[str, to
     # 提取预处理的hidden states（如果存在）
     text_hidden_states_list = []
     audio_hidden_states_list = []
+    target_hidden_states_list = []
     use_preprocessed_list = []
     
     # 检查batch中每个样本是否有预处理的hidden states
@@ -616,24 +626,28 @@ def collate_fn(batch: List[Dict[str, Any]], debug: bool = False) -> Dict[str, to
         use_preprocessed_item = item.get('use_preprocessed', False)
         text_hs = item.get('text_hidden_states')
         audio_hs = item.get('audio_hidden_states')
+        target_hs = item.get('target_hidden_states')  # 可选的目标hidden states
         
         if use_preprocessed_item and text_hs is not None and audio_hs is not None:
             # 验证hidden states是有效的tensor
             if isinstance(text_hs, torch.Tensor) and isinstance(audio_hs, torch.Tensor):
                 text_hidden_states_list.append(text_hs)
                 audio_hidden_states_list.append(audio_hs)
+                target_hidden_states_list.append(target_hs if target_hs is not None and isinstance(target_hs, torch.Tensor) else None)
                 use_preprocessed_list.append(True)
             else:
                 if debug:
                     print(f"⚠️  Sample has invalid hidden states types: text_hs={type(text_hs)}, audio_hs={type(audio_hs)}")
                 text_hidden_states_list.append(None)
                 audio_hidden_states_list.append(None)
+                target_hidden_states_list.append(None)
                 use_preprocessed_list.append(False)
         else:
             if debug and use_preprocessed_item:
                 print(f"⚠️  Sample marked as use_preprocessed but missing hidden states: text_hs={text_hs is not None}, audio_hs={audio_hs is not None}")
             text_hidden_states_list.append(None)
             audio_hidden_states_list.append(None)
+            target_hidden_states_list.append(None)
             use_preprocessed_list.append(False)
     
     # 找到最大长度并padding
@@ -668,6 +682,7 @@ def collate_fn(batch: List[Dict[str, Any]], debug: bool = False) -> Dict[str, to
         'use_preprocessed': has_valid_preprocessed,
         'text_hidden_states': text_hidden_states_list if has_valid_preprocessed else None,
         'audio_hidden_states': audio_hidden_states_list if has_valid_preprocessed else None,
+        'target_hidden_states': target_hidden_states_list if has_valid_preprocessed else None,
     }
     
     if debug:

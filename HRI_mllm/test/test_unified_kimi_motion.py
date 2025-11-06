@@ -59,13 +59,19 @@ def load_test_model(model_path: str, device: str = "cuda"):
         attn_pdrop=0.1,
     )
     
+    # 从checkpoint中获取mixer配置（如果有的话）
+    mixer_intermediate_size = checkpoint.get('mixer_intermediate_size', None)
+    mixer_num_layers = checkpoint.get('mixer_num_layers', 2)
+    
     # 创建模型实例
     model = UnifiedKimiMotionModel(
         kimi_model_path=kimi_model_path,
         gpt2_config=gpt2_config,
         freeze_kimi=freeze_kimi,
         freeze_adaptor=freeze_adaptor,
-        train_mixer_only=train_mixer_only
+        train_mixer_only=train_mixer_only,
+        mixer_intermediate_size=mixer_intermediate_size,
+        mixer_num_layers=mixer_num_layers
     )
     
     # 加载模型权重

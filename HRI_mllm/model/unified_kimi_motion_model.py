@@ -18,25 +18,52 @@ from HRI_mllm.model.kimi_motion.config import KimiAudioConfig
 
 class HiddenStateMixer(nn.Module):
     """
-    混合Kimi模型的text和audio hidden states
+    简单的Hidden State Mixer
+    使用downsample和upsample结构，参考多模态大模型的适配器设计
     """
-    def __init__(self, text_hidden_size: int, audio_hidden_size: int, output_hidden_size: int):
+    def __init__(self, text_hidden_size: int, audio_hidden_size: int, output_hidden_size: int,
+                 intermediate_size: int = None, num_layers: int = 2):
         super().__init__()
         self.text_hidden_size = text_hidden_size
         self.audio_hidden_size = audio_hidden_size
         self.output_hidden_size = output_hidden_size
         
-        # 将text和audio hidden states映射到相同维度
-        self.text_projection = nn.Linear(text_hidden_size, output_hidden_size)
-        self.audio_projection = nn.Linear(audio_hidden_size, output_hidden_size)
+        # 计算中间维度：如果未指定，使用text和audio的平均值作为中间维度
+        if intermediate_size is None:
+            # 使用较大的中间维度以保持表达能力
+            intermediate_size = max((text_hidden_size + audio_hidden_size) // 2, output_hidden_size * 2)
         
-        # 混合权重学习
+        self.intermediate_size = intermediate_size
+        
+        # 第一步：Downsample - 将text和audio特征分别降维到中间维度
+        self.text_downsample = nn.Sequential(
+            nn.Linear(text_hidden_size, intermediate_size),
+            nn.GELU()
+        )
+        self.audio_downsample = nn.Sequential(
+            nn.Linear(audio_hidden_size, intermediate_size),
+            nn.GELU()
+        )
+        
+        # 第二步：融合层 - 将text和audio特征融合
+        # 使用可学习的混合权重
         self.mix_weights = nn.Parameter(torch.tensor([0.5, 0.5]))  # [text_weight, audio_weight]
         
-        # 可选的融合层
-        self.fusion_layer = nn.Sequential(
-            nn.Linear(output_hidden_size * 2, output_hidden_size),
-            nn.ReLU(),
+        # 第三步：中间MLP层进行特征处理（可选，用于增强表达能力）
+        mlp_layers = []
+        for i in range(num_layers):
+            mlp_layers.append(nn.Linear(intermediate_size, intermediate_size))
+            mlp_layers.append(nn.GELU())
+        
+        if num_layers > 0:
+            self.fusion_mlp = nn.Sequential(*mlp_layers)
+        else:
+            self.fusion_mlp = nn.Identity()
+        
+        # 第四步：Upsample - 将中间维度升维到目标维度
+        self.upsample = nn.Sequential(
+            nn.Linear(intermediate_size, output_hidden_size),
+            nn.GELU(),
             nn.Linear(output_hidden_size, output_hidden_size)
         )
         
@@ -48,26 +75,21 @@ class HiddenStateMixer(nn.Module):
         Returns:
             mixed_hidden_states: [batch_size, seq_len, output_hidden_size]
         """
-        # 投影到相同维度
-        text_proj = self.text_projection(text_hidden_states)  # [batch_size, seq_len, output_hidden_size]
-        audio_proj = self.audio_projection(audio_hidden_states)  # [batch_size, seq_len, output_hidden_size]
+        # 第一步：Downsample
+        text_down = self.text_downsample(text_hidden_states)  # [batch_size, seq_len, intermediate_size]
+        audio_down = self.audio_downsample(audio_hidden_states)  # [batch_size, seq_len, intermediate_size]
         
-        # 应用softmax确保权重和为1
+        # 第二步：融合 - 使用可学习的权重加权混合
         weights = F.softmax(self.mix_weights, dim=0)
+        fused = weights[0] * text_down + weights[1] * audio_down
         
-        # 加权混合
-        mixed = weights[0] * text_proj + weights[1] * audio_proj
+        # 第三步：通过MLP进一步处理
+        fused = self.fusion_mlp(fused)
         
-        # 可选：通过融合层进一步处理
-        if hasattr(self, 'fusion_layer'):
-            # 拼接text和audio特征
-            concat_features = torch.cat([text_proj, audio_proj], dim=-1)  # [batch_size, seq_len, output_hidden_size*2]
-            fused_features = self.fusion_layer(concat_features)  # [batch_size, seq_len, output_hidden_size]
-            
-            # 残差连接
-            mixed = mixed + fused_features
+        # 第四步：Upsample
+        output = self.upsample(fused)  # [batch_size, seq_len, output_hidden_size]
         
-        return mixed
+        return output
 
 
 class UnifiedKimiMotionModel(nn.Module):
@@ -86,8 +108,11 @@ class UnifiedKimiMotionModel(nn.Module):
                  audio_loss_weight: float = 0.1,
                  debug: bool = False,
                  skip_kimi_model: bool = False,
+                 skip_adaptor: bool = False,  # 新增：是否跳过adaptor加载
                  adaptor_checkpoint_path: Optional[str] = None,
-                 preprocessed_hidden_states_dir: Optional[str] = None):
+                 preprocessed_hidden_states_dir: Optional[str] = None,
+                 mixer_intermediate_size: Optional[int] = None,
+                 mixer_num_layers: int = 2):
         super().__init__()
         
         self.freeze_kimi = freeze_kimi
@@ -97,8 +122,11 @@ class UnifiedKimiMotionModel(nn.Module):
         self.audio_loss_weight = audio_loss_weight    # audio token loss权重（更低）
         self.debug = debug
         self.skip_kimi_model = skip_kimi_model
+        self.skip_adaptor = skip_adaptor
         self.kimi_model_path = kimi_model_path
         self.preprocessed_hidden_states_dir = preprocessed_hidden_states_dir
+        self.mixer_intermediate_size = mixer_intermediate_size
+        self.mixer_num_layers = mixer_num_layers
         
         # 只在非debug模式或主进程打印关键信息
         if not debug or (torch.distributed.is_initialized() and torch.distributed.get_rank() == 0):
@@ -223,21 +251,38 @@ class UnifiedKimiMotionModel(nn.Module):
                 self.text_tokenizer = None
                 self.kimia_text_blank = 18  # 默认值
         
-        # 创建hidden state混合器
+        # 创建hidden state混合器（使用downsample和upsample结构）
         self.hidden_state_mixer = HiddenStateMixer(
             text_hidden_size=text_hidden_size,
             audio_hidden_size=audio_hidden_size,
-            output_hidden_size=gpt2_config.hidden_size  # GPT2的hidden size，通常是768
+            output_hidden_size=gpt2_config.hidden_size,  # GPT2的hidden size，通常是768
+            intermediate_size=self.mixer_intermediate_size,
+            num_layers=self.mixer_num_layers
         )
         
-        # 创建GPT2 adaptor
-        self.motion_adaptor = MixedInputGPT2(
-            config=gpt2_config,
-            audio_hidden_size=gpt2_config.hidden_size  # 现在输入是混合后的hidden state
-        )
+        # 如果跳过adaptor加载，创建一个轻量级的loss head用于训练
+        if self.skip_adaptor:
+            # 创建一个简单的projection层用于将mixed_hidden_states映射到motion token logits
+            # vocab_size通常为1034 (512*2 + 10)
+            vocab_size = gpt2_config.vocab_size if hasattr(gpt2_config, 'vocab_size') else 1034
+            self.mixer_loss_head = nn.Linear(gpt2_config.hidden_size, vocab_size)
+            self.motion_adaptor = None
+            print("✅ Skipping adaptor loading - using lightweight loss head for mixer training")
+        else:
+            # 创建GPT2 adaptor
+            self.motion_adaptor = MixedInputGPT2(
+                config=gpt2_config,
+                audio_hidden_size=gpt2_config.hidden_size  # 现在输入是混合后的hidden state
+            )
+            self.mixer_loss_head = None
+        
+        # 如果跳过了adaptor加载，不需要加载adaptor权重
+        if self.skip_adaptor:
+            if adaptor_checkpoint_path is not None:
+                print("⚠️  Skipping adaptor checkpoint loading (adaptor not loaded)")
         
         # 如果提供了预训练adaptor的checkpoint，加载权重
-        if adaptor_checkpoint_path is not None and os.path.exists(adaptor_checkpoint_path):
+        elif adaptor_checkpoint_path is not None and os.path.exists(adaptor_checkpoint_path):
             print(f"🔄 Loading pre-trained adaptor from: {adaptor_checkpoint_path}")
             try:
                 checkpoint = torch.load(adaptor_checkpoint_path, map_location="cpu", weights_only=False)
@@ -296,11 +341,12 @@ class UnifiedKimiMotionModel(nn.Module):
                 print(f"⚠️  Adaptor checkpoint not found: {adaptor_checkpoint_path}")
                 print(f"   Will use random initialization")
         
-        # 冻结adaptor参数
-        if self.freeze_adaptor:
-            for param in self.motion_adaptor.parameters():
-                param.requires_grad = False
-            print("✅ Motion adaptor parameters frozen")
+        # 冻结adaptor参数（如果adaptor存在）
+        if not self.skip_adaptor:
+            if self.freeze_adaptor:
+                for param in self.motion_adaptor.parameters():
+                    param.requires_grad = False
+                print("✅ Motion adaptor parameters frozen")
         
         # 设置训练模式
         if self.train_mixer_only:
@@ -314,7 +360,10 @@ class UnifiedKimiMotionModel(nn.Module):
             print(f"   - Kimi model: Skipped (using preprocessed hidden states)")
         else:
             print(f"   - Kimi model: {'frozen' if self.freeze_kimi else 'trainable'}")
-        print(f"   - Motion adaptor: {'frozen' if self.freeze_adaptor else 'trainable'}")
+        if self.skip_adaptor:
+            print(f"   - Motion adaptor: Skipped (using lightweight loss head)")
+        else:
+            print(f"   - Motion adaptor: {'frozen' if self.freeze_adaptor else 'trainable'}")
         print(f"   - Hidden state mixer: trainable")
     
     def forward(self, 
@@ -679,7 +728,124 @@ class UnifiedKimiMotionModel(nn.Module):
             traceback.print_exc()
             raise
         
-        # 3. 通过motion adaptor生成motion tokens
+        # 3. 如果跳过adaptor，使用轻量级loss head直接计算loss，或者使用保存的target_hidden_states
+        loss = None
+        logits = None
+        use_target_hidden_states = False
+        
+        if self.skip_adaptor:
+            # 检查batch中是否有target_hidden_states（从预处理的hidden states中加载）
+            if batch is not None and batch.get('target_hidden_states') is not None:
+                target_hidden_states_list = batch.get('target_hidden_states')
+                
+                if target_hidden_states_list is not None and len(target_hidden_states_list) > 0:
+                    # 检查是否有有效的target_hidden_states
+                    valid_targets = [t for t in target_hidden_states_list if t is not None]
+                    if valid_targets:
+                        # 使用MSE loss，让mixer的输出匹配目标hidden states（在对应位置）
+                        # 注意：target_hidden_states是adaptor transformer输出的完整序列
+                        # 我们需要对齐mixer输出到audio token位置
+                        
+                        # 从labels中获取audio token位置
+                        if labels is not None:
+                            audio_mask = (labels == -100)
+                            batch_size, seq_len = labels.shape
+                            
+                            # 对齐目标hidden states到mixer输出位置
+                            loss_list = []
+                            for batch_idx in range(batch_size):
+                                audio_positions = torch.where(audio_mask[batch_idx])[0]
+                                if len(audio_positions) > 0 and batch_idx < len(valid_targets):
+                                    target_hs = valid_targets[batch_idx].to(mixed_hidden_states.device)
+                                    sample_mixed = mixed_hidden_states[batch_idx]
+                                    
+                                    # 对齐长度
+                                    min_len = min(len(audio_positions), sample_mixed.shape[0], target_hs.shape[0])
+                                    if min_len > 0:
+                                        # 获取目标位置的hidden states
+                                        target_positions = audio_positions[:min_len]
+                                        target_subset = target_hs[target_positions]  # [min_len, hidden_size]
+                                        mixed_subset = sample_mixed[:min_len]  # [min_len, hidden_size]
+                                        
+                                        # 计算MSE loss
+                                        mse_loss = nn.functional.mse_loss(mixed_subset, target_subset)
+                                        loss_list.append(mse_loss)
+                            
+                            if loss_list:
+                                loss = torch.stack(loss_list).mean()
+                                use_target_hidden_states = True
+            
+            # 如果没有target_hidden_states或计算失败，fallback到loss head方式
+            if not use_target_hidden_states:
+                # 使用轻量级loss head
+                logits = self.mixer_loss_head(mixed_hidden_states)  # [batch_size, seq_len, vocab_size]
+                
+                # 计算loss（如果有labels）
+                if labels is not None:
+                    # 由于我们只有audio token的hidden states，我们需要一个映射策略
+                    # 方案1：使用motion_tokens作为target，通过attention或pooling对齐
+                    # 方案2：直接预测每个audio token位置对应的下一个motion token
+                    
+                    # 这里使用方案2：对于每个audio token的hidden state，预测对应的motion token
+                    # 需要从labels中提取motion tokens，并与mixed_hidden_states对齐
+                    
+                    # 获取motion tokens（从labels或motion_tokens参数）
+                    if motion_tokens is not None:
+                        # 直接使用motion_tokens作为target
+                        batch_size = mixed_hidden_states.shape[0]
+                        audio_seq_len = mixed_hidden_states.shape[1]
+                        motion_seq_len = motion_tokens.shape[1] if len(motion_tokens.shape) > 1 else len(motion_tokens)
+                        
+                        # 将motion tokens对齐到audio sequence
+                        # 简单的方案：截断或padding到相同长度
+                        min_len = min(audio_seq_len, motion_seq_len)
+                        
+                        # 使用交叉熵损失
+                        shift_logits = logits[:, :min_len, :].contiguous()  # [batch_size, min_len, vocab_size]
+                        if len(motion_tokens.shape) == 1:
+                            shift_labels = motion_tokens[:min_len].unsqueeze(0).expand(batch_size, -1)
+                        else:
+                            shift_labels = motion_tokens[:, :min_len].contiguous()
+                        
+                        loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+                        loss = loss_fct(
+                            shift_logits.view(-1, shift_logits.size(-1)),
+                            shift_labels.view(-1)
+                        )
+                    else:
+                        # 如果没有motion_tokens，尝试从labels中提取
+                        # 这是fallback方案
+                        motion_mask = (labels != -100)
+                        if motion_mask.any():
+                            # 提取motion token IDs
+                            motion_token_ids = labels[motion_mask]
+                            # 这个方案比较复杂，需要复杂的对齐逻辑
+                            # 暂时使用简单的loss
+                            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+                            # 简化：只计算motion token位置的loss
+                            motion_positions = torch.where(motion_mask.view(-1))[0]
+                            if len(motion_positions) > 0:
+                                # 选择对应的logits和labels
+                                flat_logits = logits.view(-1, logits.size(-1))
+                                selected_logits = flat_logits[motion_positions]
+                                selected_labels = labels[motion_mask]
+                                loss = loss_fct(selected_logits, selected_labels)
+            
+            # 返回输出
+            from transformers.modeling_outputs import CausalLMOutputWithPast
+            output = CausalLMOutputWithPast(
+                loss=loss * self.motion_loss_weight if loss is not None else None,
+                logits=logits if 'logits' in locals() else None,
+                past_key_values=None,
+                hidden_states=None,
+                attentions=None,
+            )
+            if loss is not None:
+                output.motion_loss = loss
+            output.audio_loss = None
+            return output
+        
+        # 3. 通过motion adaptor生成motion tokens（原来的逻辑）
         # 直接使用labels，labels中-100的位置是audio token，其他位置是motion token
         # Adaptor的forward方法会自动处理这两种token类型
         
@@ -722,6 +888,9 @@ class UnifiedKimiMotionModel(nn.Module):
                 
                 # 将motion token embeddings放到motion token位置
                 if motion_mask.any():
+                    if self.motion_adaptor is None:
+                        raise ValueError("Cannot use adaptor: motion_adaptor is None (skip_adaptor=True)")
+                    
                     # 从interleaved sequences中获取motion token IDs
                     if interleaved_sequences is not None:
                         motion_token_ids = interleaved_sequences[motion_mask]
@@ -1087,6 +1256,8 @@ class UnifiedKimiMotionModel(nn.Module):
             'freeze_kimi': self.freeze_kimi,
             'freeze_adaptor': self.freeze_adaptor,
             'train_mixer_only': self.train_mixer_only,
+            'mixer_intermediate_size': getattr(self, 'mixer_intermediate_size', None),
+            'mixer_num_layers': getattr(self, 'mixer_num_layers', 2),
         }
         torch.save(save_dict, save_path)
         
@@ -1102,6 +1273,8 @@ class UnifiedKimiMotionModel(nn.Module):
         freeze_kimi = checkpoint.get('freeze_kimi', True)
         freeze_adaptor = checkpoint.get('freeze_adaptor', True)
         train_mixer_only = checkpoint.get('train_mixer_only', True)
+        mixer_intermediate_size = checkpoint.get('mixer_intermediate_size', None)
+        mixer_num_layers = checkpoint.get('mixer_num_layers', 2)
         
         # 创建模型实例（需要提供kimi_model_path和gpt2_config）
         # 这里需要根据实际情况调整
@@ -1110,7 +1283,9 @@ class UnifiedKimiMotionModel(nn.Module):
             gpt2_config=GPT2Config(),  # 需要从checkpoint中恢复
             freeze_kimi=freeze_kimi,
             freeze_adaptor=freeze_adaptor,
-            train_mixer_only=train_mixer_only
+            train_mixer_only=train_mixer_only,
+            mixer_intermediate_size=mixer_intermediate_size,
+            mixer_num_layers=mixer_num_layers
         )
         
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -1127,8 +1302,11 @@ def create_unified_model(kimi_model_path: str,
                         audio_loss_weight: float = 0.1,
                         debug: bool = False,
                         skip_kimi_model: bool = False,
+                        skip_adaptor: bool = False,  # 新增：是否跳过adaptor加载
                         adaptor_checkpoint_path: Optional[str] = None,
-                        preprocessed_hidden_states_dir: Optional[str] = None) -> UnifiedKimiMotionModel:
+                        preprocessed_hidden_states_dir: Optional[str] = None,
+                        mixer_intermediate_size: Optional[int] = None,
+                        mixer_num_layers: int = 2) -> UnifiedKimiMotionModel:
     """
     创建统一的Kimi-Motion模型
     
@@ -1142,8 +1320,11 @@ def create_unified_model(kimi_model_path: str,
         audio_loss_weight: Audio token loss权重（默认0.1，较低）
         debug: 是否启用调试模式
         skip_kimi_model: 是否跳过Kimi模型加载（当使用预处理的hidden states时，可以设为True以节省显存）
+        skip_adaptor: 是否跳过adaptor加载（当只训练mixer时，可以设为True以节省显存，使用轻量级loss head）
         adaptor_checkpoint_path: 预训练adaptor的checkpoint路径（可选，如果提供将加载预训练权重）
         preprocessed_hidden_states_dir: 预处理hidden states目录（用于自动检测hidden size）
+        mixer_intermediate_size: Mixer中间维度（默认None，自动计算）
+        mixer_num_layers: Mixer的MLP层数（默认2）
     
     Returns:
         UnifiedKimiMotionModel: 统一模型实例
@@ -1177,8 +1358,11 @@ def create_unified_model(kimi_model_path: str,
         audio_loss_weight=audio_loss_weight,
         debug=debug,
         skip_kimi_model=skip_kimi_model,
+        skip_adaptor=skip_adaptor,
         adaptor_checkpoint_path=adaptor_checkpoint_path,
-        preprocessed_hidden_states_dir=preprocessed_hidden_states_dir
+        preprocessed_hidden_states_dir=preprocessed_hidden_states_dir,
+        mixer_intermediate_size=mixer_intermediate_size,
+        mixer_num_layers=mixer_num_layers
     )
     
     return model

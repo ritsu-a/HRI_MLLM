@@ -5,6 +5,22 @@
 1. Kimi模型：user_text + user_audio → assistant_audio (监督学习)
 2. Adaptor：Kimi hidden states → motion_tokens (监督学习)
 只训练MLP映射层和adaptor
+
+使用预处理的hidden states训练（推荐）：
+当提供 --preprocessed_hidden_states_dir 参数时：
+- 自动跳过Kimi模型加载（节省GPU显存）
+- 强制只训练Hidden State Mixer
+- Adaptor将被冻结（不训练）
+- 必须确保所有样本都有对应的预处理hidden states
+
+示例命令：
+python train_unified_kimi_motion.py \
+    --train_json_paths data/train.jsonl \
+    --preprocessed_hidden_states_dir output/preprocessed_hidden_states \
+    --batch_size 4 \
+    --num_epochs 10 \
+    --learning_rate 1e-4 \
+    --save_dir output/mixer_model
 """
 
 import os
@@ -513,9 +529,11 @@ def parse_args():
     parser.add_argument('--wandb_project', type=str, default="unified-kimi-motion",
                        help='wandb项目名称')
     parser.add_argument('--preprocessed_hidden_states_dir', type=str, default=None,
-                       help='预处理hidden states目录路径（如果提供，将使用预处理的hidden states加速训练）')
+                       help='预处理hidden states目录路径（如果提供，将使用预处理的hidden states进行训练，跳过Kimi模型加载，只训练mixer）')
     parser.add_argument('--adaptor_checkpoint_path', type=str, default=None,
                        help='预训练adaptor的checkpoint路径（如果提供，将加载预训练权重）')
+    parser.add_argument('--skip_kimi_model', action='store_true',
+                       help='跳过Kimi模型加载（当使用预处理的hidden states时自动启用）')
     
     return parser.parse_args()
 
@@ -579,10 +597,54 @@ def main():
     if is_main_process:
         print("🔄 Creating unified model...")
     
-    # 如果使用了预处理的hidden states，可以选择跳过Kimi模型加载以节省显存
+    # 如果使用了预处理的hidden states，强制跳过Kimi模型加载以节省显存
+    # 并强制只训练mixer
+    if args.preprocessed_hidden_states_dir is None:
+        if is_main_process:
+            print("⚠️  Warning: --preprocessed_hidden_states_dir not provided")
+            print("   Will load Kimi model (requires more GPU memory)")
+    else:
+        if not os.path.exists(args.preprocessed_hidden_states_dir):
+            if is_main_process:
+                print(f"❌ Error: Preprocessed hidden states directory not found: {args.preprocessed_hidden_states_dir}")
+                print("   Please run prepare_mixer_training_data.py first to generate hidden states")
+            raise FileNotFoundError(f"Preprocessed hidden states directory not found: {args.preprocessed_hidden_states_dir}")
+    
     skip_kimi_model = args.preprocessed_hidden_states_dir is not None and os.path.exists(args.preprocessed_hidden_states_dir)
-    if skip_kimi_model and is_main_process:
-        print("💡 Using preprocessed hidden states - will skip Kimi model loading to save GPU memory")
+    if skip_kimi_model:
+        if is_main_process:
+            print("💡 Using preprocessed hidden states - will skip Kimi model and adaptor loading to save GPU memory")
+            print("   - Setting skip_kimi_model=True")
+            print("   - Setting skip_adaptor=True (using lightweight loss head)")
+            print("   - Setting train_mixer_only=True (only training mixer)")
+        
+        # 强制设置参数以确保只训练mixer，并跳过adaptor加载
+        args.skip_kimi_model = True
+        args.train_mixer_only = True
+        args.freeze_adaptor = True
+        args.skip_adaptor = True  # 跳过adaptor加载，使用轻量级loss head
+        
+        # 检查预处理目录是否有效
+        index_path = os.path.join(args.preprocessed_hidden_states_dir, "index.json")
+        if not os.path.exists(index_path):
+            if is_main_process:
+                print(f"⚠️  Warning: index.json not found in {args.preprocessed_hidden_states_dir}")
+                print(f"   Training will continue, but hidden states must be provided in batch")
+        else:
+            if is_main_process:
+                import json
+                with open(index_path, 'r', encoding='utf-8') as f:
+                    index_data = json.load(f)
+                    num_samples = len(index_data.get('samples', []))
+                    print(f"✅ Found preprocessed hidden states: {num_samples} samples")
+                    if 'text_hidden_size' in index_data:
+                        print(f"   - Text hidden size: {index_data['text_hidden_size']}")
+                    if 'audio_hidden_size' in index_data:
+                        print(f"   - Audio hidden size: {index_data['audio_hidden_size']}")
+    elif args.preprocessed_hidden_states_dir is not None:
+        if is_main_process:
+            print(f"⚠️  Warning: Preprocessed hidden states directory not found: {args.preprocessed_hidden_states_dir}")
+            print(f"   Will fall back to loading Kimi model")
     
     model = create_unified_model(
         kimi_model_path=args.kimi_model_path,
@@ -594,6 +656,7 @@ def main():
         audio_loss_weight=args.audio_loss_weight,
         debug=args.debug,
         skip_kimi_model=skip_kimi_model,
+        skip_adaptor=args.skip_adaptor if hasattr(args, 'skip_adaptor') else skip_kimi_model,  # 如果skip_kimi_model，也skip_adaptor
         adaptor_checkpoint_path=args.adaptor_checkpoint_path,
         preprocessed_hidden_states_dir=args.preprocessed_hidden_states_dir
     )
@@ -634,6 +697,20 @@ def main():
         print(f"   - Num workers: {args.num_workers}")
         if args.num_workers > 0:
             print(f"   ⚠️  Note: With num_workers > 0, first batch loading may take a moment")
+        
+        # 验证预处理hidden states的使用
+        if skip_kimi_model:
+            skip_adaptor = args.skip_adaptor if hasattr(args, 'skip_adaptor') else skip_kimi_model
+            print(f"\n📋 Training Configuration (with preprocessed hidden states):")
+            print(f"   ✅ Kimi model: Skipped (using preprocessed hidden states)")
+            if skip_adaptor:
+                print(f"   ✅ Adaptor: Skipped (using lightweight loss head)")
+            else:
+                print(f"   ✅ Adaptor: Frozen (not training)")
+            print(f"   ✅ Only training: Hidden State Mixer")
+            print(f"   ✅ Preprocessed hidden states: Required")
+            print(f"\n   If any sample is missing preprocessed hidden states, training will fail.")
+            print(f"   Please ensure all samples in the dataset have been preprocessed.")
     
     # 如果是分布式训练，需要包装DataLoader
     if world_size > 1:
@@ -687,6 +764,19 @@ def main():
         print(f"   - Total epochs: {args.num_epochs}")
         print(f"   - Dataloader length: {len(train_dataloader)} batches per epoch")
         print(f"   - Effective batch size: {args.batch_size * args.gradient_accumulation_steps * world_size}")
+        if skip_kimi_model:
+            skip_adaptor = args.skip_adaptor if hasattr(args, 'skip_adaptor') else skip_kimi_model
+            print(f"   - Training mode: Hidden State Mixer only (using preprocessed hidden states)")
+            print(f"   - Kimi model: Not loaded (saving GPU memory)")
+            if skip_adaptor:
+                print(f"   - Adaptor: Not loaded (using lightweight loss head, saving GPU memory)")
+            else:
+                print(f"   - Adaptor: Frozen")
+        else:
+            print(f"   - Training mode: Full model")
+            print(f"   - Kimi model: Loaded ({'frozen' if args.freeze_kimi else 'trainable'})")
+            print(f"   - Adaptor: {'frozen' if args.freeze_adaptor else 'trainable'}")
+            print(f"   - Mixer: {'trainable' if args.train_mixer_only else ('trainable' if not args.freeze_adaptor else 'frozen')}")
         print("=" * 80)
     
     # 开始训练

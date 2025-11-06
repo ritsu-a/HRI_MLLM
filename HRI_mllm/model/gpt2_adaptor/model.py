@@ -27,6 +27,15 @@ class MixedInputGPT2(GPT2LMHeadModel):
         for param in self.audio_tokenizer.parameters():
             param.requires_grad = False
         
+        # 获取特殊token ID（从config中读取，如果不存在则使用默认值）
+        self.audio_gesture_start_token_id = getattr(config, 'audio_gesture_start_token_id', None)
+        self.audio_gesture_end_token_id = getattr(config, 'audio_gesture_end_token_id', None)
+        self.gesture_start_token_id = getattr(config, 'gesture_start_token_id', None)
+        self.gesture_end_token_id = getattr(config, 'gesture_end_token_id', None)
+        
+        # 获取audio_tokenizer的vocab_size
+        self.audio_vocab_size = self.audio_tokenizer.num_embeddings
+        
 
         
     
@@ -50,22 +59,51 @@ class MixedInputGPT2(GPT2LMHeadModel):
         # 处理audio tokens
         if labels is not None and attention_mask is not None:
             audio_mask = (labels == -100) * (attention_mask == 1)
-            if audio_mask.any():
-                audio_tokens = input_data[audio_mask]
-
-                audio_embeds = self.audio_tokenizer(audio_tokens.long()).detach()
-
-                projected_hidden = self.input_projection(audio_embeds.float())
-
-                # 将token embeddings放入对应位置
-                hidden_states[audio_mask] = projected_hidden
+            
+            # 检测audio特殊token（audio_gesture_start和audio_gesture_end）
+            # 这些token虽然被标记为audio类型，但不在audio_tokenizer的vocab范围内
+            special_audio_tokens_mask = torch.zeros_like(input_data, dtype=torch.bool)
+            if self.audio_gesture_start_token_id is not None:
+                special_audio_tokens_mask |= (input_data == self.audio_gesture_start_token_id)
+            if self.audio_gesture_end_token_id is not None:
+                special_audio_tokens_mask |= (input_data == self.audio_gesture_end_token_id)
+            
+            # 确保特殊token只在audio_mask范围内
+            special_audio_tokens_mask = special_audio_tokens_mask & audio_mask
+            
+            # 从audio_mask中分离出特殊token和普通audio token
+            normal_audio_mask = audio_mask & ~special_audio_tokens_mask
+            
+            # 处理普通audio tokens
+            if normal_audio_mask.any():
+                # 检查token是否在audio_tokenizer的vocab范围内
+                valid_audio_mask = normal_audio_mask & (input_data < self.audio_vocab_size) & (input_data >= 0)
+                
+                if valid_audio_mask.any():
+                    valid_audio_tokens = input_data[valid_audio_mask]
+                    audio_embeds = self.audio_tokenizer(valid_audio_tokens.long()).detach()
+                    projected_hidden = self.input_projection(audio_embeds.float())
+                    hidden_states[valid_audio_mask] = projected_hidden
+                
+                # 处理超出audio_tokenizer范围的audio tokens，使用motion_tokenizer
+                invalid_audio_mask = normal_audio_mask & ~valid_audio_mask
+                if invalid_audio_mask.any():
+                    invalid_audio_tokens = input_data[invalid_audio_mask]
+                    invalid_audio_embeds = self.transformer.wte(invalid_audio_tokens.long())
+                    hidden_states[invalid_audio_mask] = invalid_audio_embeds
+            
+            # 处理audio特殊token（audio_gesture_start和audio_gesture_end），使用motion_tokenizer
+            if special_audio_tokens_mask.any():
+                special_audio_tokens = input_data[special_audio_tokens_mask]
+                special_audio_embeds = self.transformer.wte(special_audio_tokens.long())
+                hidden_states[special_audio_tokens_mask] = special_audio_embeds
             
             # 处理motion tokens
-            motion_mask = ~audio_mask
+            motion_mask = ~audio_mask & (attention_mask == 1)
             if motion_mask.any():
                 motion_tokens = input_data[motion_mask]
                 motion_embeds = self.transformer.wte(motion_tokens.long())
-
+                
                 # 将projected hidden states放入对应位置
                 hidden_states[motion_mask] = motion_embeds
         else:

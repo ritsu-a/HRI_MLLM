@@ -144,6 +144,23 @@ Server:
 
 
 
+
+# 1. 准备数据时提供adaptor和mixer checkpoint
+# 准备数据（只需要adaptor checkpoint，不需要mixer）
+python HRI_mllm/train/prepare_mixer_training_data.py \
+    --json_paths data/BEAT_v2_kimi_tokens.jsonl \
+    --kimi_model_path moonshotai/Kimi-Audio-7B \
+    --output_dir data/preprocessed_hidden_states \
+    --adaptor_checkpoint_path output/motion_adaptor_v5/kimi_audio_motion_gpt2_brainco_synthetic_en/checkpoints/epoch_1000.pt
+
+# 2. 训练时使用预处理的数据（会自动使用target_hidden_states，不需要loss head）
+python HRI_mllm/train/train_unified_kimi_motion.py \
+    --train_json_paths data/train.jsonl \
+    --preprocessed_hidden_states_dir output/preprocessed_hidden_states \
+    --batch_size 4 \
+    --num_epochs 10
+
+Train mixer on
 TODO:
 
     in /root/pengyang/codebase/HRI_MLLM/HRI_mllm/datasets/BaseDataModule.py remove all cfg dependency

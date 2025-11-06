@@ -34,12 +34,17 @@ class JSONLAudioMotionDataset(Dataset):
                     # 从conversation中提取audio和motion tokens
                     audio_tokens = None
                     motion_tokens = None
+                    motion_labels = None
                     
                     for msg in data['conversation']:
                         if msg.get('message_type') == 'audio' and 'audio_tokens' in msg:
                             audio_tokens = msg['audio_tokens']
                         elif msg.get('message_type') == 'audio_motion' and 'motion_tokens' in msg:
                             motion_tokens = msg['motion_tokens']
+                    
+                    # 读取motion_labels（如果存在）
+                    if 'motion_labels' in data:
+                        motion_labels = data['motion_labels']
                     
                     if audio_tokens is None or motion_tokens is None:
                         continue
@@ -50,20 +55,78 @@ class JSONLAudioMotionDataset(Dataset):
                     if not isinstance(motion_tokens, torch.Tensor):
                         motion_tokens = torch.tensor(motion_tokens)
                     
-                    # 构建完整序列
+                    # 构建motion_tokens中需要插入特殊token的位置集合
+                    gesture_start_indices = set()
+                    gesture_end_indices = set()
+                    if motion_labels:
+                        for label in motion_labels:
+                            if 'start_token_index' in label:
+                                gesture_start_indices.add(label['start_token_index'])
+                            if 'end_token_index' in label:
+                                gesture_end_indices.add(label['end_token_index'])
+                    
+                    # 构建完整序列（带特殊token）
                     full_sequence = []
                     token_types = []
                     
+                    # 跟踪当前在motion_tokens中的索引
+                    motion_token_idx = 0
+                    
                     for i in range(len(audio_tokens)):
+                        # 插入audio token
                         full_sequence.append(audio_tokens[i].item())
                         token_types.append(0)
                         
+                        # 根据interleave_ratio插入motion tokens
                         if (i + 1) % self.interleave_audios == 0:
-                            motion_idx = i // self.interleave_audios * self.interleave_motions
-                            for j in range(self.interleave_motions):
-                                if motion_idx + j < len(motion_tokens):
-                                    full_sequence.append(motion_tokens[motion_idx + j].item())
+                            motion_block_size = self.interleave_motions
+                            for j in range(motion_block_size):
+                                if motion_token_idx < len(motion_tokens):
+                                    # 检查是否是gesture_start
+                                    if motion_token_idx in gesture_start_indices:
+                                        # 先插入gesture_start token
+                                        full_sequence.append(self.config.gesture_start_token_id)
+                                        token_types.append(1)  # motion类型
+                                        # 然后插入audio_gesture_start token
+                                        full_sequence.append(self.config.audio_gesture_start_token_id)
+                                        token_types.append(0)  # audio类型
+                                    
+                                    # 插入motion token
+                                    full_sequence.append(motion_tokens[motion_token_idx].item())
                                     token_types.append(1)
+                                    
+                                    # 检查是否是gesture_end
+                                    if motion_token_idx in gesture_end_indices:
+                                        # 先插入gesture_end token
+                                        full_sequence.append(self.config.gesture_end_token_id)
+                                        token_types.append(1)  # motion类型
+                                        # 然后插入audio_gesture_end token
+                                        full_sequence.append(self.config.audio_gesture_end_token_id)
+                                        token_types.append(0)  # audio类型
+                                    
+                                    motion_token_idx += 1
+                    
+                    # 处理剩余的motion tokens（如果有的话）
+                    while motion_token_idx < len(motion_tokens):
+                        # 检查是否是gesture_start
+                        if motion_token_idx in gesture_start_indices:
+                            full_sequence.append(self.config.gesture_start_token_id)
+                            token_types.append(1)
+                            full_sequence.append(self.config.audio_gesture_start_token_id)
+                            token_types.append(0)
+                        
+                        # 插入motion token
+                        full_sequence.append(motion_tokens[motion_token_idx].item())
+                        token_types.append(1)
+                        
+                        # 检查是否是gesture_end
+                        if motion_token_idx in gesture_end_indices:
+                            full_sequence.append(self.config.gesture_end_token_id)
+                            token_types.append(1)
+                            full_sequence.append(self.config.audio_gesture_end_token_id)
+                            token_types.append(0)
+                        
+                        motion_token_idx += 1
                     
                     # 应用滑动窗口
                     self.apply_sliding_window(full_sequence, token_types)
@@ -151,8 +214,8 @@ parser.add_argument('--epochs', type=int, default=300,
 args = parser.parse_args()
 
 exp_name = "kimi_audio_motion_gpt2_brainco_synthetic_en"
-os.makedirs(os.path.join("output/motion_adaptor_v5", exp_name), exist_ok=True)
-os.makedirs(os.path.join("output/motion_adaptor_v5", exp_name, "checkpoints"), exist_ok=True)
+os.makedirs(os.path.join("output/motion_adaptor_v7", exp_name), exist_ok=True)
+os.makedirs(os.path.join("output/motion_adaptor_v7", exp_name, "checkpoints"), exist_ok=True)
 
 os.environ["WANDB_MODE"] = "offline"
 
@@ -177,6 +240,8 @@ all_jsonl_files = {
     "BEAT": "/root/workspace/HRI_MLLM/data/BEAT_v2_kimi_tokens.jsonl",
     "internet": "/root/workspace/HRI_MLLM/data/internet_data_v1_kimi_tokens.jsonl",
     "SG_2_or_3_long_sentence_1030_en_kimi_tokens": "/root/workspace/HRI_MLLM/data/SG_2_or_3_long_sentence_1030_en_kimi_tokens.jsonl",
+    "single_motion_sentence_version2_kimi_tokens": "/root/workspace/HRI_MLLM/data/single_motion_sentence_version2_kimi_labeled_tokens_train.jsonl",
+    "single_motion_sentence_version2_kimi_tokens_test": "/root/workspace/HRI_MLLM/data/single_motion_sentence_version2_kimi_labeled_tokens_test.jsonl",
 }
 
 # 根据命令行参数选择数据集
@@ -217,6 +282,10 @@ if local_rank == 0:
             "epochs": args.epochs,  # 使用命令行参数
             "sliding_window_step": 32,
             "pad_token_id": 512*2 + 1,
+            "gesture_start_token_id": 512*2 + 2,
+            "audio_gesture_start_token_id": 512*2 + 3,
+            "gesture_end_token_id": 512*2 + 4,
+            "audio_gesture_end_token_id": 512*2 + 5,
             "interleave_ratio": [1, 1],
             "exp_name": exp_name,
         }
@@ -235,6 +304,10 @@ else:
         "epochs": args.epochs,  # 使用命令行参数
         "sliding_window_step": 32,
         "pad_token_id": 512*2 + 1,
+        "gesture_start_token_id": 512*2 + 2,
+        "audio_gesture_start_token_id": 512*2 + 3,
+        "gesture_end_token_id": 512*2 + 4,
+        "audio_gesture_end_token_id": 512*2 + 5,
         "interleave_ratio": [1, 1],
         "exp_name": exp_name,
     })()
@@ -251,6 +324,11 @@ model_config = GPT2Config(
     embd_pdrop=0.1,
     attn_pdrop=0.1,
 )
+# 添加特殊token ID到模型配置
+model_config.audio_gesture_start_token_id = config.audio_gesture_start_token_id
+model_config.audio_gesture_end_token_id = config.audio_gesture_end_token_id
+model_config.gesture_start_token_id = config.gesture_start_token_id
+model_config.gesture_end_token_id = config.gesture_end_token_id
 model = MixedInputGPT2(model_config)
 
 device = torch.device(f'cuda:{local_rank}')
@@ -498,7 +576,7 @@ for epoch in range(start_epoch, config.epochs):
         print(f"Epoch {epoch+1}/{config.epochs} | Loss: {avg_loss:.4f}")
         
         if (epoch + 1) % 50 == 0:
-            ckpt_path = f"output/motion_adaptor_v5/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
+            ckpt_path = f"output/motion_adaptor_v7/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
             # 在DDP模式下使用model.module，否则直接使用model
             model_to_save = model.module if world_size > 1 else model
             torch.save({
@@ -512,7 +590,7 @@ for epoch in range(start_epoch, config.epochs):
 if local_rank == 0:
     # 在DDP模式下使用model.module，否则直接使用model
     model_to_save = model.module if world_size > 1 else model
-    model_to_save.save_pretrained(f"output/motion_adaptor_v5/{config.exp_name}")
+    model_to_save.save_pretrained(f"output/motion_adaptor_v7/{config.exp_name}")
 
 if world_size > 1:
     dist.destroy_process_group()
