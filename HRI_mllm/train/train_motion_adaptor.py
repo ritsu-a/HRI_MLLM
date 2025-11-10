@@ -214,8 +214,8 @@ parser.add_argument('--epochs', type=int, default=300,
 args = parser.parse_args()
 
 exp_name = "kimi_audio_motion_gpt2_brainco_synthetic_en"
-os.makedirs(os.path.join("output/motion_adaptor_v7", exp_name), exist_ok=True)
-os.makedirs(os.path.join("output/motion_adaptor_v7", exp_name, "checkpoints"), exist_ok=True)
+os.makedirs(os.path.join("output/motion_adaptor_v10", exp_name), exist_ok=True)
+os.makedirs(os.path.join("output/motion_adaptor_v10", exp_name, "checkpoints"), exist_ok=True)
 
 os.environ["WANDB_MODE"] = "offline"
 
@@ -237,11 +237,7 @@ else:
 
 # JSONL文件路径 - 每个数据集独立的jsonl文件
 all_jsonl_files = {
-    "BEAT": "/root/workspace/HRI_MLLM/data/BEAT_v2_kimi_tokens.jsonl",
-    "internet": "/root/workspace/HRI_MLLM/data/internet_data_v1_kimi_tokens.jsonl",
-    "SG_2_or_3_long_sentence_1030_en_kimi_tokens": "/root/workspace/HRI_MLLM/data/SG_2_or_3_long_sentence_1030_en_kimi_tokens.jsonl",
-    "single_motion_sentence_version2_kimi_tokens": "/root/workspace/HRI_MLLM/data/single_motion_sentence_version2_kimi_labeled_tokens_train.jsonl",
-    "single_motion_sentence_version2_kimi_tokens_test": "/root/workspace/HRI_MLLM/data/single_motion_sentence_version2_kimi_labeled_tokens_test.jsonl",
+    "BEAT": "/root/workspace/HRI_MLLM/data/BEAT_v2_1110_tokens.jsonl",
 }
 
 # 根据命令行参数选择数据集
@@ -576,7 +572,7 @@ for epoch in range(start_epoch, config.epochs):
         print(f"Epoch {epoch+1}/{config.epochs} | Loss: {avg_loss:.4f}")
         
         if (epoch + 1) % 50 == 0:
-            ckpt_path = f"output/motion_adaptor_v7/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
+            ckpt_path = f"output/motion_adaptor_v10/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
             # 在DDP模式下使用model.module，否则直接使用model
             model_to_save = model.module if world_size > 1 else model
             torch.save({
@@ -590,7 +586,7 @@ for epoch in range(start_epoch, config.epochs):
 if local_rank == 0:
     # 在DDP模式下使用model.module，否则直接使用model
     model_to_save = model.module if world_size > 1 else model
-    model_to_save.save_pretrained(f"output/motion_adaptor_v7/{config.exp_name}")
+    model_to_save.save_pretrained(f"output/motion_adaptor_v10/{config.exp_name}")
 
 if world_size > 1:
     dist.destroy_process_group()

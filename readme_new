@@ -1,3 +1,7 @@
+mixed_statistics:
+    /root/workspace/HRI_MLLM/data/Mixed_Statistics_Equal_Fixed
+
+
 Compute joint_vec on single motion:
     python HRI_mllm/datasets/process_single_motion_to_joint_vec.py
 
@@ -46,6 +50,7 @@ Visualize JSONL motion:
 
 
 Train Motion Adaptor on BEAT:
+    bash train_beat_8gpu.sh
 
 Finetune Motion Adaptor on single motion:
 
