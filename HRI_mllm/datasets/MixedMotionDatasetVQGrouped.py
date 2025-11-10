@@ -2,10 +2,12 @@ import random
 import codecs as cs
 import numpy as np
 import torch
+import os
 from torch.utils import data
 from rich.progress import track
 from os.path import join as pjoin
 from .T2M_dataset import Text2MotionDataset
+from .DirectMotionDataset import DirectMotionDataset
 
 
 class MixedMotionDatasetVQGrouped(Text2MotionDataset):
@@ -59,24 +61,47 @@ class MixedMotionDatasetVQGrouped(Text2MotionDataset):
             kwargs_temp = kwargs.copy()
             kwargs_temp['data_root'] = data_root
             
-            # 创建临时数据集实例来加载数据
-            temp_dataset = Text2MotionDataset(
-                split=split,
-                mean=mean,
-                std=std,
-                max_motion_length=max_motion_length,
-                min_motion_length=min_motion_length,
-                unit_length=unit_length,
-                fps=fps,
-                tmpFile=tmpFile,
-                tiny=tiny,
-                debug=debug,
-                **kwargs_temp
-            )
+            # 🔧 检查split文件是否存在，如果不存在则使用DirectMotionDataset
+            split_file = pjoin(data_root, split + '.txt')
+            use_direct_dataset = not os.path.exists(split_file)
             
-            # 过滤太短的运动
+            if use_direct_dataset:
+                # 使用DirectMotionDataset（直接从目录加载所有文件）
+                print(f"  Dataset {dataset_idx}: split file not found, using DirectMotionDataset")
+                temp_dataset = DirectMotionDataset(
+                    split=split,
+                    mean=mean,
+                    std=std,
+                    max_motion_length=max_motion_length,
+                    min_motion_length=min_motion_length,
+                    unit_length=unit_length,
+                    fps=fps,
+                    tmpFile=tmpFile,
+                    tiny=tiny,
+                    debug=debug,
+                    **kwargs_temp
+                )
+            else:
+                # 使用Text2MotionDataset（从split文件加载）
+                temp_dataset = Text2MotionDataset(
+                    split=split,
+                    mean=mean,
+                    std=std,
+                    max_motion_length=max_motion_length,
+                    min_motion_length=min_motion_length,
+                    unit_length=unit_length,
+                    fps=fps,
+                    tmpFile=tmpFile,
+                    tiny=tiny,
+                    debug=debug,
+                    **kwargs_temp
+                )
+            
             # 🔧 获取该数据集的特定窗口大小
             dataset_win_size = self.dataset_window_sizes[dataset_idx] if self.dataset_window_sizes and len(self.dataset_window_sizes) > dataset_idx else self.window_size
+            
+            # 🔧 检查是否是seg_finger数据集（通过data_root路径判断）
+            is_seg_finger = 'seg_finger' in data_root
             
             valid_names = []
             for name in temp_dataset.name_list:
@@ -89,9 +114,16 @@ class MixedMotionDatasetVQGrouped(Text2MotionDataset):
                     if motion.shape[0] >= min_motion_length:
                         is_valid = True
                 else:
-                    # 固定窗口模式：使用该数据集特定的窗口大小
-                    if motion.shape[0] >= dataset_win_size:
-                        is_valid = True
+                    # 固定窗口模式
+                    if is_seg_finger:
+                        # 🔧 对于seg_finger，保留所有动作（即使长度小于窗口大小）
+                        # 最小长度设为8帧，确保可以处理
+                        if motion.shape[0] >= 8:
+                            is_valid = True
+                    else:
+                        # 对于其他数据集，使用原来的逻辑
+                        if motion.shape[0] >= dataset_win_size:
+                            is_valid = True
                 
                 # 如果有效，则存储样本
                 if is_valid:
@@ -143,15 +175,31 @@ class MixedMotionDatasetVQGrouped(Text2MotionDataset):
         
         # 从name中提取dataset_idx
         dataset_idx = int(name.split('_')[1])
+        
+        # 🔧 检查是否是seg_finger数据集
+        is_seg_finger = 'seg_finger' in self.data_root_list[dataset_idx] if dataset_idx < len(self.data_root_list) else False
 
-        # 🔧 根据该样本的窗口大小进行切分
+        # 🔧 根据该样本的窗口大小进行切分或padding
         if window_size == 1:
             # 任意长度模式：直接使用完整序列
             motion = motion
         else:
-            # 使用该样本特定的窗口大小进行切分
-            idx_start = random.randint(0, max(0, motion.shape[0] - window_size))
-            motion = motion[idx_start:idx_start + window_size]
+            if is_seg_finger and motion.shape[0] < window_size:
+                # 🔧 对于seg_finger，如果动作长度小于窗口大小，进行padding
+                padding_length = window_size - motion.shape[0]
+                padding = np.zeros((padding_length, motion.shape[1]), dtype=motion.dtype)
+                motion = np.concatenate([motion, padding], axis=0)
+                length = window_size  # 更新长度为窗口大小
+            elif motion.shape[0] >= window_size:
+                # 如果动作长度大于等于窗口大小，随机切分
+                idx_start = random.randint(0, max(0, motion.shape[0] - window_size))
+                motion = motion[idx_start:idx_start + window_size]
+            else:
+                # 其他情况（动作长度小于窗口大小但不是seg_finger），也进行padding
+                padding_length = window_size - motion.shape[0]
+                padding = np.zeros((padding_length, motion.shape[1]), dtype=motion.dtype)
+                motion = np.concatenate([motion, padding], axis=0)
+                length = window_size
         
         # 归一化
         motion = (motion - self.mean) / self.std

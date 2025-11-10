@@ -1,0 +1,123 @@
+# =============================================================================
+# VQ-VAE Finetune配置文件 - BEAT + seg_finger
+# =============================================================================
+# 此配置文件用于在预训练模型基础上对BEAT和seg_finger数据集进行finetune
+# 
+# 🔧 关键设置：
+# - 使用较小的学习率（1e-5，比预训练小10倍）
+# - 必须指定预训练checkpoint路径
+# - 只使用BEAT和seg_finger数据集
+# - 使用分组批次避免padding浪费
+# =============================================================================
+
+# =============================================================================
+# 训练模式配置
+# =============================================================================
+
+# 🆕 固定窗口训练模式
+use_arbitrary_length: false         # 禁用任意长度训练
+max_arbitrary_length: 256           # 固定窗口长度
+min_arbitrary_length: 256           # 固定窗口长度
+
+# 🔧 关键改进：按数据集分组的批次
+use_grouped_batches: true          # 启用分组批次，确保同一个batch中只包含来自同一数据集的样本
+
+# 变长窗口训练（关闭，使用固定窗口）
+# BEAT使用256帧，seg_finger使用32帧
+use_variable_length: false
+min_window_length: 32              # seg_finger的最小窗口长度
+max_window_length: 256             # BEAT的最大窗口长度
+
+# =============================================================================
+# 基础训练配置
+# =============================================================================
+
+epochs: 100              # Finetune通常需要较少的epochs
+lr: 1e-5                 # 🔧 Finetune学习率：比预训练小10倍
+beta: 0.25               # 保持与预训练一致
+warmup_steps: 100        # 减少warmup步数
+clip_grad_norm: 1.0
+
+# 两阶段训练（关闭，finetune不需要）
+use_two_stage_training: false
+stage1_epochs: 50
+
+# 🔧 Finetune数据集权重：平衡BEAT和seg_finger
+seg_weight: 10.0         # seg_finger权重
+beat_weight: 1.0         # BEAT权重
+internet_weight: 0.0     # 不使用internet数据
+
+# =============================================================================
+# 损失函数配置
+# =============================================================================
+
+# 损失函数已简化，只使用基础重建损失
+use_amplitude_loss: false
+use_velocity_loss: false
+use_acceleration_loss: false
+
+# 学习率衰减策略
+use_lr_decay: true
+lr_decay_start: 50       # 从第50个epoch开始衰减
+lr_decay_rate: 0.95
+lr_min: 1e-6
+
+# =============================================================================
+# 模型架构配置
+# =============================================================================
+
+quantizer: ema_reset
+code_num: 512
+code_dim: 512
+output_emb_width: 512
+
+down_t: 2
+stride_t: 2
+width: 512
+depth: 3
+dilation_growth_rate: 3
+norm: batch_norm
+activation: gelu
+nfeats: 491
+mu: 0.95
+
+# =============================================================================
+# 训练配置
+# =============================================================================
+
+use_mixed_stats: true    # 使用混合统计信息
+semantic_weight: 10.0    # 语义权重（对seg_finger更重要）
+ckpt: ""                 # 🔧 必须指定预训练checkpoint路径（通过命令行或环境变量）
+save_interval: 10        # Finetune时更频繁保存
+output_dir: "output/vqvae_finetune_beat_segfinger"
+
+monitor_codebook_usage: true
+monitor_amplitude: true
+
+# =============================================================================
+# Finetune特定配置
+# =============================================================================
+
+# 🔧 Finetune模式：只使用BEAT和seg_finger
+finetune_mode: true
+finetune_datasets: ["BEAT_v2_kimi", "seg_finger"]  # 指定要使用的数据集
+
+# =============================================================================
+# 说明
+# =============================================================================
+# 此配置文件用于在预训练VQ-VAE模型基础上对BEAT和seg_finger数据集进行finetune
+# 
+# 🔧 关键改进点：
+# 1. 学习率降低10倍（1e-5）- 防止破坏预训练权重
+# 2. 只使用BEAT和seg_finger数据集
+# 3. 使用分组批次，避免padding浪费
+# 4. BEAT使用256帧窗口，seg_finger使用32帧窗口
+# 5. seg_finger保留所有动作（包括过短的），过短的动作会进行padding
+# 6. 必须指定预训练checkpoint路径（通过ckpt参数或环境变量）
+# 7. 减少训练epochs（100个epochs通常足够）
+#
+# 使用方法：
+# VQVAE_CONFIG="g1_vqvae_finetune_beat_segfinger.yaml" \
+# VQVAE_CKPT="output/vqvae_arbitrary_length_balanced/checkpoints/vqvae_final.pt" \
+# torchrun --nproc_per_node=8 HRI_mllm/train/train_vqvae_finetune.py
+

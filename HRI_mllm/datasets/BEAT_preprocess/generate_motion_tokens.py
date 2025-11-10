@@ -4,7 +4,8 @@ from tqdm import tqdm
 import os
 import torch
 import yaml
-from HRI_mllm import ROOT
+import json
+from HRI_mllm import ROOT, DATA_ROOT
 from HRI_mllm.model.motion_encoder.vqvae_body_hand import VQVaeBodyHand
 from HRI_mllm.utils.motion_utils.g1ml3d_final import load_normalization_stats
 
@@ -19,9 +20,9 @@ def open_yaml(path):
         return yaml.safe_load(file)
 
 
-def process_motion_to_tokens(motion_data, motion_vae, mean_t, std_t, device, target_length, window_size=256, stride=None, code_num=512):
+def process_motion_to_tokens(motion_data, motion_vae, mean_t, std_t, device, target_length, window_size=None, stride=None, code_num=512):
     """
-    将动作数据编码为tokens，body和hand分开编码
+    将动作数据编码为tokens，body和hand分开编码（整段处理，不使用窗口）
     
     Args:
         motion_data: numpy array, shape (T, 491)
@@ -30,7 +31,7 @@ def process_motion_to_tokens(motion_data, motion_vae, mean_t, std_t, device, tar
         std_t: 归一化标准差
         device: 计算设备
         target_length: 目标token长度（与audio对齐，未使用）
-        window_size: 窗口大小（用于padding短序列）
+        window_size: 窗口大小（已废弃，不再使用）
         stride: 未使用，保留以兼容性
         code_num: codebook大小
         
@@ -42,16 +43,21 @@ def process_motion_to_tokens(motion_data, motion_vae, mean_t, std_t, device, tar
     data_tensor = torch.from_numpy(motion_data).unsqueeze(0).to(device).float()
     normalized_input = (data_tensor - mean_t) / std_t
     
-    # 如果序列太短，padding到window_size
+    # 🔧 整段处理：不使用window_size，直接处理完整序列
+    # 只确保序列长度满足模型的最小要求（通常为8帧）
     input_length = normalized_input.shape[1]
-    if input_length < window_size:
-        padding_size = window_size - input_length
+    min_required_length = 8  # 模型架构要求的最小长度
+    
+    if input_length < min_required_length:
+        # 如果序列太短，padding到最小长度（仅确保模型可以处理）
+        padding_size = min_required_length - input_length
         padding = torch.zeros(1, padding_size, normalized_input.shape[2], device=device)
         normalized_input = torch.cat([normalized_input, padding], dim=1)
     
-    # 使用标准编码方式
+    # 使用标准编码方式（支持任意长度）
     with torch.no_grad():
         # 使用encode方法获取body和hand的编码
+        # VQ-VAE的encoder可以处理任意长度的序列
         (body_code, hand_code), _ = motion_vae.encode(normalized_input)
         
         # body_code: (1, T_body), hand_code: (1, T_hand)
@@ -94,6 +100,117 @@ def find_audio_file(base_name, audio_dirs):
     return None
 
 
+def find_audio_file_for_jsonl(base_name, data_dir, dataset_name):
+    """查找音频文件（用于jsonl创建）"""
+    # 尝试多个可能的音频目录
+    audio_dirs = []
+    
+    if "beat" in dataset_name.lower():
+        # BEAT相关数据集
+        audio_dirs.append(os.path.join(DATA_ROOT, "BEAT_v2"))
+        audio_dirs.append(os.path.join(DATA_ROOT, "beat_english_v0.2.1"))
+    else:
+        # internet_data或其他
+        audio_dirs.append(os.path.join(DATA_ROOT, "internet_data_1021"))
+        audio_dirs.append(os.path.join(DATA_ROOT, "internet_data_v1_kimi"))
+        audio_dirs.append(os.path.join(DATA_ROOT, "single_motion_sentence_version2"))
+    
+    for audio_dir in audio_dirs:
+        if not os.path.exists(audio_dir):
+            continue
+        
+        # 尝试直接匹配
+        for ext in ['.wav', '.mp3']:
+            potential_audio = os.path.join(audio_dir, base_name + ext)
+            if os.path.exists(potential_audio):
+                return potential_audio
+        
+        # BEAT特殊格式：{number}/filename.wav
+        if "_" in base_name:
+            parts = base_name.split('_')
+            if len(parts) >= 2 and parts[0].isdigit():
+                potential_audio = os.path.join(audio_dir, parts[0], base_name + '.wav')
+                if os.path.exists(potential_audio):
+                    return potential_audio
+        
+        # 递归搜索子目录
+        for root, dirs, files in os.walk(audio_dir):
+            for file in files:
+                if file.startswith(base_name) and file.endswith(('.wav', '.mp3')):
+                    return os.path.join(root, file)
+    
+    return None
+
+
+def create_jsonl_entry(body_tokens, hand_tokens, audio_tokens, base_name, data_dir, dataset_name, user_prompt, audio_file_path=None, code_num=512):
+    """创建jsonl条目"""
+    # 转换为numpy并展平
+    if isinstance(body_tokens, torch.Tensor):
+        body_tokens = body_tokens.cpu().numpy().reshape(-1)
+    else:
+        body_tokens = np.array(body_tokens).reshape(-1)
+    
+    if isinstance(hand_tokens, torch.Tensor):
+        hand_tokens = hand_tokens.cpu().numpy().reshape(-1)
+    else:
+        hand_tokens = np.array(hand_tokens).reshape(-1)
+    
+    if isinstance(audio_tokens, torch.Tensor):
+        audio_tokens = audio_tokens.cpu().numpy().reshape(-1)
+    else:
+        audio_tokens = np.array(audio_tokens).reshape(-1)
+    
+    # 合并body和hand tokens到统一的codebook
+    # body tokens: [0, code_num-1] = [0, 511]
+    # hand tokens: [code_num, 2*code_num-1] = [512, 1023] (已在process_motion_to_tokens中添加偏移)
+    # 最终motion tokens: body[0], hand[0], body[1], hand[1], ... (逐对交替)
+    motion_tokens = []
+    max_len = max(len(body_tokens), len(hand_tokens))
+    for i in range(max_len):
+        if i < len(body_tokens):
+            motion_tokens.append(int(body_tokens[i]))  # body token: [0, 511]
+        if i < len(hand_tokens):
+            motion_tokens.append(int(hand_tokens[i]))  # hand token: [512, 1023]
+    
+    # 查找音频文件路径
+    if audio_file_path and os.path.exists(audio_file_path):
+        # 使用实际找到的音频文件路径
+        wav_path = audio_file_path
+    else:
+        # 尝试查找音频文件
+        wav_path = find_audio_file_for_jsonl(base_name, data_dir, dataset_name)
+        if wav_path is None:
+            # 使用placeholder
+            wav_path = f"<audio_path_for_{base_name}>"
+    
+    # 转换为list
+    audio_tokens = audio_tokens.tolist()
+    
+    return {
+        "task_type": "s2s",
+        "conversation": [
+            {
+                "role": "user",
+                'message_type': 'text',
+                "content": user_prompt
+            },
+            {
+                "role": "user",
+                'message_type': 'audio', 
+                'content': wav_path,
+                'audio_tokens': audio_tokens
+            },
+            {
+                "role": "assistant",
+                "message_type": "audio_motion",
+                'audio_tokens': audio_tokens,
+                'content': wav_path,
+                'motion_tokens': motion_tokens
+            },
+        ]
+    }
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate motion and audio tokens from data')
     parser.add_argument("--vqvae_config", type=str, default="g1_vqvae_arbitrary_length_balanced.yaml", 
@@ -107,10 +224,21 @@ if __name__ == "__main__":
     parser.add_argument("--motion_subdir", type=str, default="new_joint_vecs")
     parser.add_argument("--audio_subdir", type=str, default=None)
     parser.add_argument("--output_subdir", type=str, default="tokens")
-    parser.add_argument("--window_size", type=int, default=256, help="Window size for padding short sequences (BEAT: 256, SeG: 64)")
+    parser.add_argument("--window_size", type=int, default=None, help="Window size (deprecated, not used - processing full sequences)")
     parser.add_argument("--stride", type=int, default=None, help="Not used, kept for compatibility")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--test_mode", action="store_true")
+    
+    # 🔧 JSONL相关参数
+    parser.add_argument("--create_jsonl", action="store_true", default=False,
+                       help="Create jsonl file after generating tokens")
+    parser.add_argument("--jsonl_output_dir", type=str, default=None,
+                       help="Output directory for jsonl files (default: DATA_ROOT)")
+    parser.add_argument("--jsonl_output_name", type=str, default=None,
+                       help="Output jsonl file name (default: {dataset_name}_tokens.jsonl, or auto-detect for BEAT_v2_kimi -> BEAT_v2_1110)")
+    parser.add_argument("--user_prompt", type=str, 
+                       default="Please repeat the following spoken content with a corresponding full-body motion sequence.",
+                       help="User prompt for jsonl entries")
     
     args = parser.parse_args()
     
@@ -241,6 +369,8 @@ if __name__ == "__main__":
         
         # 处理每个文件
         success_count = 0
+        jsonl_entries = []  # 存储jsonl条目
+        
         for motion_file in tqdm(motion_files, desc=f"Processing {data_dir_name}"):
             try:
                 motion_path = os.path.join(motion_dir, motion_file)
@@ -267,25 +397,18 @@ if __name__ == "__main__":
                     
                     target_length = len(audio_tokens)
                     
-                    # window_size兼容，仅seg为64
-                    if "seg" in data_dir_name.lower():
-                        window_size = 64
-                    else:
-                        window_size = 256
-                    
-                    # 编码动作数据
+                    # 🔧 整段处理：不使用window_size，直接处理完整序列
+                    # 编码动作数据（整段处理）
                     motion_data = np.load(motion_path)
                     body_tokens, hand_tokens = process_motion_to_tokens(
                         motion_data, motion_vae, mean_t, std_t, 
                         args.device, target_length,
-                        window_size=window_size,
+                        window_size=None,  # 不使用window_size
                         stride=args.stride,
                         code_num=motion_config.get("code_num", 512)
                     )
                     
-                    
-                    
-                    # 保存
+                    # 保存tokens
                     body_motion_output_path = os.path.join(output_dir, base_name + '_body_tokens.pt')
                     hand_motion_output_path = os.path.join(output_dir, base_name + '_hand_tokens.pt')
                     audio_output_path = os.path.join(output_dir, base_name + '_audio_tokens.pt')
@@ -293,6 +416,17 @@ if __name__ == "__main__":
                     torch.save(body_tokens, body_motion_output_path)
                     torch.save(hand_tokens, hand_motion_output_path)
                     torch.save(audio_tokens, audio_output_path)
+                    
+                    # 🔧 创建jsonl条目（如果启用了jsonl输出）
+                    if args.create_jsonl:
+                        jsonl_entry = create_jsonl_entry(
+                            body_tokens, hand_tokens, audio_tokens,
+                            base_name, data_dir, data_dir_name,
+                            args.user_prompt,
+                            audio_file_path=audio_file,  # 传递实际找到的音频文件路径
+                            code_num=motion_config.get("code_num", 512)
+                        )
+                        jsonl_entries.append(jsonl_entry)
                     
                     success_count += 1
                 else:
@@ -305,7 +439,35 @@ if __name__ == "__main__":
                 continue
         
         print(f"✅ Completed processing {data_dir_name}: {success_count}/{len(motion_files)} successful")
+        
+        # 🔧 保存jsonl文件（如果启用了jsonl输出）
+        if args.create_jsonl and jsonl_entries:
+            jsonl_output_dir = args.jsonl_output_dir if args.jsonl_output_dir else DATA_ROOT
+            os.makedirs(jsonl_output_dir, exist_ok=True)
+            
+            # 确定输出文件名
+            if args.jsonl_output_name:
+                # 使用指定的输出文件名
+                jsonl_output_filename = args.jsonl_output_name
+                if not jsonl_output_filename.endswith('.jsonl'):
+                    jsonl_output_filename += '.jsonl'
+            elif data_dir_name == "BEAT_v2_kimi":
+                # BEAT_v2_kimi特殊处理：使用BEAT_v2_1110作为输出文件名
+                jsonl_output_filename = "BEAT_v2_1110_tokens.jsonl"
+            else:
+                # 默认使用数据集名称
+                jsonl_output_filename = f"{data_dir_name}_tokens.jsonl"
+            
+            jsonl_output_file = os.path.join(jsonl_output_dir, jsonl_output_filename)
+            
+            with open(jsonl_output_file, 'w', encoding='utf-8') as f:
+                for entry in jsonl_entries:
+                    f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+            
+            print(f"✅ JSONL file saved: {jsonl_output_file} ({len(jsonl_entries)} entries)")
     
     print(f"\n{'='*80}")
     print(f"🎉 All processing completed!")
+    if args.create_jsonl:
+        print(f"✅ JSONL files have been created")
     print(f"{'='*80}") 

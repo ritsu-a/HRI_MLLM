@@ -2,10 +2,12 @@ import random
 import codecs as cs
 import numpy as np
 import torch
+import os
 from torch.utils import data
 from rich.progress import track
 from os.path import join as pjoin
 from .T2M_dataset import Text2MotionDataset
+from .DirectMotionDataset import DirectMotionDataset
 
 
 class MixedMotionDatasetVQ(Text2MotionDataset):
@@ -42,27 +44,61 @@ class MixedMotionDatasetVQ(Text2MotionDataset):
             kwargs_temp = kwargs.copy()
             kwargs_temp['data_root'] = data_root
             
-            # 创建临时数据集实例来加载数据
-            temp_dataset = Text2MotionDataset(
-                split=split,
-                mean=mean,
-                std=std,
-                max_motion_length=max_motion_length,
-                min_motion_length=min_motion_length,
-                unit_length=unit_length,
-                fps=fps,
-                tmpFile=tmpFile,
-                tiny=tiny,
-                debug=debug,
-                **kwargs_temp
-            )
+            # 🔧 检查split文件是否存在，如果不存在则使用DirectMotionDataset
+            split_file = pjoin(data_root, split + '.txt')
+            use_direct_dataset = not os.path.exists(split_file)
+            
+            if use_direct_dataset:
+                # 使用DirectMotionDataset（直接从目录加载所有文件）
+                print(f"  Dataset {dataset_idx}: split file not found, using DirectMotionDataset")
+                temp_dataset = DirectMotionDataset(
+                    split=split,
+                    mean=mean,
+                    std=std,
+                    max_motion_length=max_motion_length,
+                    min_motion_length=min_motion_length,
+                    unit_length=unit_length,
+                    fps=fps,
+                    tmpFile=tmpFile,
+                    tiny=tiny,
+                    debug=debug,
+                    **kwargs_temp
+                )
+            else:
+                # 使用Text2MotionDataset（从split文件加载）
+                temp_dataset = Text2MotionDataset(
+                    split=split,
+                    mean=mean,
+                    std=std,
+                    max_motion_length=max_motion_length,
+                    min_motion_length=min_motion_length,
+                    unit_length=unit_length,
+                    fps=fps,
+                    tmpFile=tmpFile,
+                    tiny=tiny,
+                    debug=debug,
+                    **kwargs_temp
+                )
+            
+            # 🔧 检查是否是seg_finger数据集
+            is_seg_finger = 'seg_finger' in data_root
             
             # 过滤太短的运动
             valid_names = []
             for name in temp_dataset.name_list:
                 motion = temp_dataset.data_dict[name]["motion"]
-                if motion.shape[0] >= self.window_size:
-                    valid_names.append(name)
+                
+                # 🔧 对于seg_finger，保留所有动作（即使长度小于窗口大小）
+                # 最小长度设为8帧，确保可以处理
+                if is_seg_finger:
+                    if motion.shape[0] >= 8:
+                        valid_names.append(name)
+                else:
+                    # 对于其他数据集，使用原来的逻辑
+                    if motion.shape[0] >= self.window_size:
+                        valid_names.append(name)
+                
+                if name in valid_names:
                     # 添加数据集索引前缀以避免名称冲突
                     prefixed_name = f"dataset_{dataset_idx}_{name}"
                     self.all_names.append(prefixed_name)
@@ -121,10 +157,22 @@ class MixedMotionDatasetVQ(Text2MotionDataset):
         
         data = self.all_data_dict[name]
         motion, length = data["motion"], data["length"]
+        
+        # 🔧 检查是否是seg_finger数据集
+        is_seg_finger = 'seg_finger' in self.data_root_list[dataset_idx] if dataset_idx < len(self.data_root_list) else False
 
-        # 随机选择窗口
-        idx = random.randint(0, motion.shape[0] - self.window_size)
-        motion = motion[idx:idx + self.window_size]
+        # 🔧 根据动作长度和数据集类型选择处理方式
+        if motion.shape[0] < self.window_size:
+            # 如果动作长度小于窗口大小，进行padding
+            padding_length = self.window_size - motion.shape[0]
+            padding = np.zeros((padding_length, motion.shape[1]), dtype=motion.dtype)
+            motion = np.concatenate([motion, padding], axis=0)
+            length = self.window_size  # 更新长度为窗口大小
+        else:
+            # 如果动作长度大于等于窗口大小，随机切分
+            idx_start = random.randint(0, max(0, motion.shape[0] - self.window_size))
+            motion = motion[idx_start:idx_start + self.window_size]
+        
         motion = (motion - self.mean) / self.std
 
         # 返回dataset_idx用于后续的加权损失计算

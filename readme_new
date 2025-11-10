@@ -1,0 +1,52 @@
+Compute joint_vec on single motion:
+    python HRI_mllm/datasets/process_single_motion_to_joint_vec.py
+
+
+Train VQVAE:
+    VQVAE_CONFIG="g1_vqvae_arbitrary_length_balanced.yaml" \
+    torchrun --nproc_per_node=8 \
+    HRI_mllm/train/train_vqvae_final.py
+
+Finetune VQVAE:
+    VQVAE_CONFIG="g1_vqvae_finetune_beat_segfinger.yaml" \
+    VQVAE_CKPT="output/vqvae_arbitrary_length_balanced/checkpoints/vqvae_final.pt" \
+    torchrun --nproc_per_node=8 \
+    HRI_mllm/train/train_vqvae_finetune.py
+
+Compare VQVAE:
+    python HRI_mllm/test/compare_vqvae_finetune.py \
+    --pretrained_ckpt output/vqvae_arbitrary_length_balanced/checkpoints/vqvae_final.pt \
+    --finetuned_ckpt output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt \
+    --config g1_vqvae_arbitrary_length_balanced.yaml \
+    --num_samples 5
+    --output_dir ./vqvae_comparison_results
+
+
+
+Create beat JSONL:
+    python HRI_mllm/datasets/BEAT_preprocess/generate_motion_tokens.py \
+        --vqvae_config g1_vqvae_arbitrary_length_balanced.yaml \
+        --vqvae_checkpoint output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt \
+        --data_dirs BEAT_v2_kimi \
+        --device cuda \
+        --create_jsonl \
+        --jsonl_output_dir data \
+        --jsonl_output_name BEAT_v2_1110_tokens.jsonl
+
+
+Visualize JSONL motion:
+    python HRI_mllm/test/visualize_jsonl_motion.py \
+        --jsonl_path data/BEAT_v2_1110_tokens.jsonl \
+        --vqvae_config g1_vqvae_arbitrary_length_balanced.yaml \
+        --vqvae_checkpoint output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt \
+        --num_samples 5 \
+        --output_dir jsonl_visualization \
+        --compare_with_gt \
+        --dataset_name BEAT_v2_kimi
+
+
+Train Motion Adaptor on BEAT:
+
+Finetune Motion Adaptor on single motion:
+
+Test Motion Adaptor on BEAT and single motion:
