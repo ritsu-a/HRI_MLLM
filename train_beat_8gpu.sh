@@ -7,5 +7,5 @@ torchrun \
   --master_port=29500 \
   HRI_mllm/train/train_motion_adaptor.py \
   --datasets BEAT \
-  --epochs 100
+  --epochs 1000
 

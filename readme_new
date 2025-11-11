@@ -17,7 +17,7 @@ Finetune VQVAE:
     torchrun --nproc_per_node=8 \
     HRI_mllm/train/train_vqvae_finetune.py
 
-Compare VQVAE:
+TEST VQVAE:
     python HRI_mllm/test/compare_vqvae_finetune.py \
     --pretrained_ckpt output/vqvae_arbitrary_length_balanced/checkpoints/vqvae_final.pt \
     --finetuned_ckpt output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt \
@@ -38,20 +38,60 @@ Create beat JSONL:
         --jsonl_output_name BEAT_v2_1110_tokens.jsonl
 
 
+    python HRI_mllm/datasets/BEAT_preprocess/generate_motion_tokens.py \
+        --vqvae_config g1_vqvae_arbitrary_length_balanced.yaml \
+        --vqvae_checkpoint output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt \
+        --data_dirs single_motion_for_tokenizer_1108_joint_vecs \
+        --motion_subdir npy \
+        --device cuda \
+        --create_jsonl \
+        --jsonl_output_dir data \
+        --jsonl_output_name single_motion_for_tokenizer_1108_tokens.jsonl
+
+
+Create single motion JSONL with label tokens:
+    python HRI_mllm/datasets/BEAT_preprocess/generate_motion_tokens_with_labels.py \
+        --vqvae_config g1_vqvae_arbitrary_length_balanced.yaml \
+        --vqvae_checkpoint output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt \
+        --data_dirs single_motion_for_tokenizer_1108_joint_vecs \
+        --motion_subdir npy \
+        --device cuda \
+        --create_jsonl \
+        --jsonl_output_dir data \
+        --jsonl_output_name single_motion_for_tokenizer_1108_tokens_with_labels.jsonl \
+        --use_json_labels
+
+
 Visualize JSONL motion:
     python HRI_mllm/test/visualize_jsonl_motion.py \
-        --jsonl_path data/BEAT_v2_1110_tokens.jsonl \
+        --jsonl_path data/single_motion_for_tokenizer_1108_tokens_with_labels.jsonl \
         --vqvae_config g1_vqvae_arbitrary_length_balanced.yaml \
         --vqvae_checkpoint output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt \
         --num_samples 5 \
         --output_dir jsonl_visualization \
         --compare_with_gt \
-        --dataset_name BEAT_v2_kimi
+        --dataset_name single_motion_for_tokenizer_1108
 
 
 Train Motion Adaptor on BEAT:
     bash train_beat_8gpu.sh
 
 Finetune Motion Adaptor on single motion:
+    bash train_beat_single_motion_finetune_8gpu.sh
 
 Test Motion Adaptor on BEAT and single motion:
+    python HRI_mllm/test/test_adaptor_jsonl_comparison.py \
+    --jsonl_path /root/workspace/HRI_MLLM/data/single_motion_for_tokenizer_1108_tokens_with_labels.jsonl \
+    --motion_adaptor_path output/motion_adaptor_v10/kimi_audio_motion_gpt2_brainco_synthetic_en/checkpoints/epoch_1200.pt \
+    --vqvae_config g1_vqvae_arbitrary_length_balanced.yaml \
+    --vqvae_checkpoint output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt \
+    --output_dir ./adaptor_comparison_results \
+    --num_samples 5 \
+    --temperature 0.0 \
+    --top_k 1 \
+    --repetition_penalty 1.0
+
+
+
+Test Motion Adaptor on single motion:
+    python HRI_mllm/test/test_gpt2_adaptor.py 

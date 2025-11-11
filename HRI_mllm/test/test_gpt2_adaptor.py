@@ -2,6 +2,12 @@
 """
 测试GPT2 Motion Adaptor模型
 支持从checkpoint文件(.pt)或transformers格式目录加载模型
+
+VQ-VAE支持：
+- 预训练模型: output/vqvae_arbitrary_length_balanced/checkpoints/vqvae_final.pt
+- Finetune模型: output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt
+  使用 --vqvae_checkpoint 参数指定checkpoint路径
+  使用基础配置文件 g1_vqvae_arbitrary_length_balanced.yaml 即可（finetune模型使用相同配置）
 """
 
 import os
@@ -121,18 +127,28 @@ def generate_motion_tokens(model, audio_tokens, device="cuda", max_new_tokens=25
                             if token_id not in special_token_ids and token_id < next_token_logits.size(-1):
                                 next_token_logits[token_id] = next_token_logits[token_id] / repetition_penalty
                     
-                    # 应用temperature
-                    next_token_logits = next_token_logits / temperature
-                    
-                    # Top-k采样
-                    if top_k > 0:
-                        top_k_logits, top_k_indices = torch.topk(next_token_logits, min(top_k, next_token_logits.size(-1)))
-                        next_token_logits = torch.full_like(next_token_logits, float('-inf'))
-                        next_token_logits[top_k_indices] = top_k_logits
-                    
-                    # 采样
-                    probs = torch.softmax(next_token_logits, dim=-1)
-                    next_token = torch.multinomial(probs, 1).item()
+                    # 稳健采样逻辑：支持temperature=0贪心与top_k屏蔽
+                    if temperature is not None and temperature > 0:
+                        next_token_logits = next_token_logits / temperature
+                        if top_k is not None and top_k > 0:
+                            k = min(int(top_k), next_token_logits.size(-1))
+                            top_k_logits, top_k_indices = torch.topk(next_token_logits, k)
+                            masked = torch.full_like(next_token_logits, float('-inf'))
+                            masked[top_k_indices] = top_k_logits
+                            next_token_logits = masked
+                        probs = torch.softmax(next_token_logits, dim=-1)
+                        if torch.isnan(probs).any() or torch.isinf(probs).any() or probs.sum() <= 0:
+                            next_token = torch.argmax(next_token_logits, dim=-1).item()
+                        else:
+                            next_token = torch.multinomial(probs, 1).item()
+                    else:
+                        if top_k is not None and top_k > 0:
+                            k = min(int(top_k), next_token_logits.size(-1))
+                            top_k_logits, top_k_indices = torch.topk(next_token_logits, k)
+                            masked = torch.full_like(next_token_logits, float('-inf'))
+                            masked[top_k_indices] = top_k_logits
+                            next_token_logits = masked
+                        next_token = torch.argmax(next_token_logits, dim=-1).item()
                     
                     # 处理special token：根据训练时的规则补充对应的token
                     tokens_to_add = []  # 要添加到序列的tokens（包括补充的token）
@@ -307,9 +323,9 @@ def audioToken2motionPkl(audio_codes, motion_tokens_gt):
         audio_codes.squeeze(0), 
         device="cuda",
         max_new_tokens=4096,
-        temperature=1.8,
-        top_k=50,
-        repetition_penalty=1.8
+        temperature=0.0,
+        top_k=1,
+        repetition_penalty=1.0
     )
     
     # 解码motion tokens为motion data
@@ -321,13 +337,16 @@ def audioToken2motionPkl(audio_codes, motion_tokens_gt):
 # 解析命令行参数
 parser = argparse.ArgumentParser(description='Test GPT2 Motion Adaptor')
 parser.add_argument('--vqvae_config', type=str, default='g1_vqvae_arbitrary_length_balanced.yaml',
-                   help='VQ-VAE config file name')
-parser.add_argument('--vqvae_checkpoint', type=str, default=None,
-                   help='VQ-VAE checkpoint path. If not provided, will use the one in config file')
+                   help='VQ-VAE config file name. Can use base config with finetuned checkpoint.')
+parser.add_argument('--vqvae_checkpoint', type=str, default='output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt',
+                   help='VQ-VAE checkpoint path. Supports both pretrained and finetuned checkpoints. '
+                        'If not provided, will use the one in config file. '
+                        'Examples: output/vqvae_arbitrary_length_balanced/checkpoints/vqvae_final.pt '
+                        'or output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt')
 parser.add_argument('--audio_path', type=str, default="/root/workspace/HRI_MLLM/data/beat_english_v0.2.1/1/1_wayne_0_1_1_qwen1.wav",
                    help='Input audio file path')
 parser.add_argument('--motion_adaptor_path', type=str, 
-                   default="output/motion_adaptor_10_v4/kimi_audio_motion_gpt2_brainco_30_100/checkpoints/epoch_500.pt",
+                   default="/root/workspace/HRI_MLLM/output/motion_adaptor_v10/kimi_audio_motion_gpt2_brainco_synthetic_en/checkpoints/epoch_1200.pt",
                    help='Motion adaptor model path. Supports two formats: 1) checkpoint file (.pt format), 2) transformers format directory (with config.json and pytorch_model.bin)')
 args = parser.parse_args()
 
@@ -454,20 +473,38 @@ if args.vqvae_checkpoint:
 elif "ckpt" in motion_config and motion_config["ckpt"]:
     checkpoint_path = motion_config["ckpt"]
 else:
-    checkpoint_path = "output/vqvae_arbitrary_length_balanced/checkpoints/vqvae_final.pt"
-    print(f"⚠️  No checkpoint specified in config, using default: {checkpoint_path}")
+    # 尝试使用finetuned checkpoint作为默认值（如果存在）
+    finetuned_checkpoint = "output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt"
+    pretrained_checkpoint = "output/vqvae_arbitrary_length_balanced/checkpoints/vqvae_final.pt"
+    
+    if os.path.exists(finetuned_checkpoint):
+        checkpoint_path = finetuned_checkpoint
+        print(f"⚠️  No checkpoint specified, using finetuned checkpoint: {checkpoint_path}")
+    elif os.path.exists(pretrained_checkpoint):
+        checkpoint_path = pretrained_checkpoint
+        print(f"⚠️  No checkpoint specified, using pretrained checkpoint: {checkpoint_path}")
+    else:
+        checkpoint_path = pretrained_checkpoint
+        print(f"⚠️  No checkpoint specified, using default: {checkpoint_path}")
 
 # 检查checkpoint是否存在
 if not os.path.exists(checkpoint_path):
     print(f"❌ Checkpoint not found: {checkpoint_path}")
     print(f"\n可用的checkpoint路径示例:")
-    print(f"  - output/vqvae_arbitrary_length_balanced/checkpoints/vqvae_final.pt")
+    print(f"  - 预训练模型: output/vqvae_arbitrary_length_balanced/checkpoints/vqvae_final.pt")
+    print(f"  - Finetune模型: output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt")
     print(f"\n请使用 --vqvae_checkpoint 参数指定正确的路径")
     exit(1)
 
 print(f"Loading VQ-VAE checkpoint from: {checkpoint_path}")
 
+# 检测是否是finetuned checkpoint
+is_finetuned = "finetune" in checkpoint_path.lower() or "vqvae_finetune" in checkpoint_path
+if is_finetuned:
+    print(f"📦 Detected finetuned VQ-VAE checkpoint")
+
 # 加载归一化统计量（与训练时保持一致）
+# 注意：finetuned模型使用与pretrained模型相同的归一化统计量（都使用mixed statistics）
 test_mean, test_std = load_normalization_stats(motion_config)
 mean_t = torch.tensor(test_mean, dtype=torch.float32).to("cuda")
 std_t = torch.tensor(test_std, dtype=torch.float32).to("cuda")
@@ -480,13 +517,12 @@ motion_vae.load_state_dict(state_dict, strict=True)
 motion_vae.eval()
 motion_vae.to(device="cuda")
 print(f"✅ VQ-VAE model loaded successfully!")
+if is_finetuned:
+    print(f"   Using finetuned model (better performance on BEAT and seg_finger datasets)")
 
 
 
-filename = "2_scott_0_3_3"
-# audio_token_path =  f"{DATA_ROOT}/BEAT_v2_kimi/data/{filename}_audio_tokens.pt"
-# train_data_feature = np.load(f"{DATA_ROOT}/BEAT_v2_kimi/new_joint_vecs/{filename}.npy")
-# audio_path = f"{DATA_ROOT}/beat_english_v0.2.1/{filename.split('_')[0]}/{filename}.wav"
+
 
 # 使用命令行指定的音频路径
 audio_path = args.audio_path

@@ -5,6 +5,7 @@ import os
 import torch
 import yaml
 import json
+import pandas as pd
 from HRI_mllm import ROOT, DATA_ROOT
 from HRI_mllm.model.motion_encoder.vqvae_body_hand import VQVaeBodyHand
 from HRI_mllm.utils.motion_utils.g1ml3d_final import load_normalization_stats
@@ -13,6 +14,23 @@ from HRI_mllm.utils.motion_utils.g1ml3d_final import load_normalization_stats
 from huggingface_hub import snapshot_download
 from transformers import AutoConfig
 from kimia_infer.api.prompt_manager import KimiAPromptManager
+
+# Label映射关系
+LABEL_MAP = {
+    "BACKGROUND": 0, 
+    "FIST_BEAT": 1,
+    "FOREFINGER_RAISE_ONE": 2,
+    "FOREFINGER_RAISE_ONE-2": 2, 
+    "HAND_CALL": 3,
+    "HAND_RING": 4,
+    "HAND_V_SIGN": 5,
+    "PALM_HALT": 6,
+    "THUMB_FOREFINGER_AND_LITTLE_FINGER_RAISE": 7,
+    "THUMB_UP": 8,
+}
+
+# Motion token的采样率：1秒对应12.5个token
+TOKENS_PER_SECOND = 12.5
 
 
 def open_yaml(path):
@@ -152,7 +170,264 @@ def find_audio_file_for_jsonl(base_name, data_dir, dataset_name):
     return None
 
 
-def create_jsonl_entry(body_tokens, hand_tokens, audio_tokens, base_name, data_dir, dataset_name, user_prompt, audio_file_path=None, code_num=512):
+def find_json_file(base_name, data_dir, dataset_name):
+    """查找JSON文件"""
+    json_path = None
+    
+    # 首先尝试在数据目录的json子目录中查找
+    json_dir = os.path.join(data_dir, "json")
+    if os.path.exists(json_dir):
+        potential_json = os.path.join(json_dir, base_name + '.json')
+        if os.path.exists(potential_json):
+            return potential_json
+    
+    # 尝试在数据目录中直接查找
+    potential_json_paths = [
+        os.path.join(data_dir, base_name + '.json'),
+        os.path.join(DATA_ROOT, 'single_motion_for_tokenizer_1108', base_name + '.json'),
+    ]
+    
+    # 如果base_name包含目录信息，尝试在对应目录下查找
+    if '_' in base_name:
+        # 尝试从base_name中提取目录名（例如：FIST_BEAT_blend_npz_0.4_60_60_linear_with_annotation_1）
+        parts = base_name.split('_')
+        # 查找可能的目录前缀
+        for i in range(len(parts)):
+            potential_dir_name = '_'.join(parts[:i+1])
+            potential_json_dir = os.path.join(data_dir, potential_dir_name, "blend_npz_0.4_60_60_linear_with_annotation")
+            if os.path.exists(potential_json_dir):
+                potential_json = os.path.join(potential_json_dir, parts[-1] + '.json')
+                if os.path.exists(potential_json):
+                    return potential_json
+    
+    for path in potential_json_paths:
+        if os.path.exists(path):
+            json_path = path
+            break
+    
+    return json_path
+
+
+def find_csv_file(base_name, data_dir, dataset_name, csv_dir=None):
+    """查找CSV文件（如果存在）"""
+    if csv_dir:
+        csv_path = os.path.join(csv_dir, base_name + '.csv')
+        if os.path.exists(csv_path):
+            return csv_path
+    
+    # 尝试在数据目录中查找
+    potential_csv_paths = [
+        os.path.join(data_dir, "csv", base_name + '.csv'),
+        os.path.join(data_dir, base_name + '.csv'),
+    ]
+    
+    for path in potential_csv_paths:
+        if os.path.exists(path):
+            return path
+    
+    return None
+
+
+def load_motion_labels_from_json(json_path, motion_tokens_count, total_duration):
+    """
+    从JSON文件加载motion标签信息
+    
+    Args:
+        json_path: JSON文件路径
+        motion_tokens_count: motion_tokens的总数量
+        total_duration: 总时长（秒），如果为None，从JSON中读取
+        
+    Returns:
+        labels: List[Dict]，每个Dict包含motion名称和时间范围信息
+        total_duration: 总时长（秒）
+    """
+    if json_path is None or not os.path.exists(json_path):
+        return [], None
+    
+    try:
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        # 从JSON中获取total_duration
+        if total_duration is None:
+            total_duration = data.get('total_duration', None)
+            if total_duration is None:
+                # 尝试从actual_npz_duration获取
+                total_duration = data.get('actual_npz_duration', None)
+        
+        if total_duration is None:
+            print(f"Warning: Cannot determine total_duration from JSON file {json_path}")
+            return [], None
+        
+        # 提取blended_timeline中的标签信息
+        labels = []
+        blended_timeline = data.get('blended_timeline', [])
+        
+        for motion_item in blended_timeline:
+            motion_name = motion_item.get('motion', '')
+            actual_start_time = motion_item.get('actual_start_time', None)
+            actual_end_time = motion_item.get('actual_end_time', None)
+            
+            if actual_start_time is not None and actual_end_time is not None:
+                labels.append({
+                    'motion': motion_name,
+                    'start_time': actual_start_time,
+                    'end_time': actual_end_time,
+                })
+        
+        return labels, total_duration
+        
+    except Exception as e:
+        print(f"Warning: Failed to load JSON file {json_path}: {e}")
+        return [], None
+
+
+def load_motion_labels_from_csv(csv_path, motion_tokens_count, total_duration):
+    """
+    从CSV文件加载motion标签信息
+    
+    Args:
+        csv_path: CSV文件路径
+        motion_tokens_count: motion_tokens的总数量
+        total_duration: 总时长（秒），如果为None，需要从CSV或其他地方获取
+        
+    Returns:
+        labels: List[Dict]，每个Dict包含motion名称和时间范围信息
+        total_duration: 总时长（秒）
+    """
+    if csv_path is None or not os.path.exists(csv_path):
+        return [], total_duration
+    
+    try:
+        # 读取CSV文件
+        df = pd.read_csv(csv_path)
+        
+        # 检查是否有motion_start和motion_end列
+        if 'motion_start' not in df.columns or 'motion_end' not in df.columns:
+            print(f"Warning: CSV file {csv_path} does not have motion_start and motion_end columns")
+            return [], total_duration
+        
+        # 检查是否有motion或gesture列
+        motion_col = None
+        for col in ['motion', 'gesture', 'label']:
+            if col in df.columns:
+                motion_col = col
+                break
+        
+        if motion_col is None:
+            print(f"Warning: CSV file {csv_path} does not have motion/gesture/label column")
+            return [], total_duration
+        
+        labels = []
+        for _, row in df.iterrows():
+            motion_name = str(row[motion_col])
+            motion_start = float(row['motion_start'])
+            motion_end = float(row['motion_end'])
+            
+            if motion_name and not pd.isna(motion_start) and not pd.isna(motion_end):
+                labels.append({
+                    'motion': motion_name,
+                    'start_time': motion_start,
+                    'end_time': motion_end,
+                })
+        
+        # 如果没有提供total_duration，尝试从CSV中推断（取最大的motion_end）
+        if total_duration is None and len(labels) > 0:
+            max_end_time = max(label['end_time'] for label in labels)
+            total_duration = max_end_time
+        
+        return labels, total_duration
+        
+    except Exception as e:
+        print(f"Warning: Failed to load CSV file {csv_path}: {e}")
+        return [], total_duration
+
+
+def map_motion_name_to_label(motion_name):
+    """
+    将motion名称映射到label值
+    
+    Args:
+        motion_name: motion名称，例如 "FIST_BEAT-4" 或 "FIST_BEAT"
+        
+    Returns:
+        label: 对应的label值（0-8）
+    """
+    if not motion_name:
+        return 0
+    
+    # 移除可能的后缀（例如 "FIST_BEAT-4" -> "FIST_BEAT"）
+    motion_base = motion_name.split('-')[0].strip()
+    
+    # 直接在LABEL_MAP中查找
+    if motion_base in LABEL_MAP:
+        return LABEL_MAP[motion_base]
+    
+    # 如果没找到，尝试匹配部分名称
+    for key, value in LABEL_MAP.items():
+        if key in motion_base or motion_base in key:
+            return value
+    
+    # 默认返回0（BACKGROUND）
+    return 0
+
+
+def generate_label_tokens(motion_tokens, labels, total_duration):
+    """
+    根据motion tokens和标签信息生成label tokens
+    
+    Args:
+        motion_tokens: List[int]，motion tokens列表
+        labels: List[Dict]，每个Dict包含motion名称和时间范围信息
+        total_duration: 总时长（秒）
+        
+    Returns:
+        label_tokens: List[int]，label tokens列表，长度与motion_tokens相同
+    """
+    motion_tokens_count = len(motion_tokens)
+    
+    # 初始化label_tokens，默认值为0
+    label_tokens = [0] * motion_tokens_count
+    
+    if not labels or total_duration is None:
+        return label_tokens
+    
+    # 计算每秒对应的token数量
+    # 理论上应该是 TOKENS_PER_SECOND (12.5)，但实际可能略有差异
+    # 使用实际值：motion_tokens_count / total_duration
+    tokens_per_second = motion_tokens_count / total_duration
+    
+    # 处理每个标签
+    for label_info in labels:
+        motion_name = label_info.get('motion', '')
+        start_time = label_info.get('start_time', 0)
+        end_time = label_info.get('end_time', 0)
+        
+        if start_time >= end_time:
+            continue
+        
+        # 将时间转换为token索引
+        start_token_idx = int(start_time * tokens_per_second)
+        end_token_idx = int(end_time * tokens_per_second)
+        
+        # 确保索引在有效范围内
+        start_token_idx = max(0, min(start_token_idx, motion_tokens_count - 1))
+        end_token_idx = max(0, min(end_token_idx, motion_tokens_count))
+        
+        # 获取对应的label值
+        label_value = map_motion_name_to_label(motion_name)
+        
+        # 在对应的时间范围内设置label
+        for idx in range(start_token_idx, end_token_idx):
+            if idx < motion_tokens_count:
+                # 如果当前位置已经有非0的label，保留较大的值（或者可以根据需要选择其他策略）
+                if label_tokens[idx] == 0 or label_value > label_tokens[idx]:
+                    label_tokens[idx] = label_value
+    
+    return label_tokens
+
+
+def create_jsonl_entry(body_tokens, hand_tokens, audio_tokens, label_tokens, base_name, data_dir, dataset_name, user_prompt, audio_file_path=None, code_num=512):
     """创建jsonl条目"""
     # 转换为numpy并展平
     if isinstance(body_tokens, torch.Tensor):
@@ -181,6 +456,16 @@ def create_jsonl_entry(body_tokens, hand_tokens, audio_tokens, base_name, data_d
             motion_tokens.append(int(body_tokens[i]))  # body token: [0, 511]
         if i < len(hand_tokens):
             motion_tokens.append(int(hand_tokens[i]))  # hand token: [512, 1023]
+    
+    # 确保label_tokens长度与motion_tokens一致
+    if len(label_tokens) != len(motion_tokens):
+        # 如果长度不一致，调整label_tokens
+        if len(label_tokens) < len(motion_tokens):
+            # 如果label_tokens较短，用0填充
+            label_tokens.extend([0] * (len(motion_tokens) - len(label_tokens)))
+        else:
+            # 如果label_tokens较长，截断
+            label_tokens = label_tokens[:len(motion_tokens)]
     
     # 查找音频文件路径
     if audio_file_path and os.path.exists(audio_file_path):
@@ -215,23 +500,24 @@ def create_jsonl_entry(body_tokens, hand_tokens, audio_tokens, base_name, data_d
                 "message_type": "audio_motion",
                 'audio_tokens': audio_tokens,
                 'content': wav_path,
-                'motion_tokens': motion_tokens
+                'motion_tokens': motion_tokens,
+                'label_tokens': label_tokens
             },
         ]
     }
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Generate motion and audio tokens from data')
+    parser = argparse.ArgumentParser(description='Generate motion and audio tokens from data with label tokens')
     parser.add_argument("--vqvae_config", type=str, default="g1_vqvae_arbitrary_length_balanced.yaml", 
                        help="VQ-VAE config file")
     parser.add_argument("--vqvae_checkpoint", type=str, default=None,
                        help="Path to VQ-VAE checkpoint (default: from config)")
     parser.add_argument("--model_name_or_path", type=str, default="moonshotai/Kimi-Audio-7B")
     parser.add_argument("--data_dirs", type=str, nargs='+', 
-                       default=["single_motion_sentence_version2_kimi"],
+                       default=["single_motion_for_tokenizer_1108_joint_vecs"],
                        help="List of data directories to process.")
-    parser.add_argument("--motion_subdir", type=str, default="new_joint_vecs")
+    parser.add_argument("--motion_subdir", type=str, default="npy")
     parser.add_argument("--audio_subdir", type=str, default=None)
     parser.add_argument("--output_subdir", type=str, default="tokens")
     parser.add_argument("--window_size", type=int, default=None, help="Window size (deprecated, not used - processing full sequences)")
@@ -239,16 +525,24 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--test_mode", action="store_true")
     
-    # 🔧 JSONL相关参数
+    # JSONL相关参数
     parser.add_argument("--create_jsonl", action="store_true", default=False,
                        help="Create jsonl file after generating tokens")
     parser.add_argument("--jsonl_output_dir", type=str, default=None,
                        help="Output directory for jsonl files (default: DATA_ROOT)")
     parser.add_argument("--jsonl_output_name", type=str, default=None,
-                       help="Output jsonl file name (default: {dataset_name}_tokens.jsonl, or auto-detect for BEAT_v2_kimi -> BEAT_v2_1110)")
+                       help="Output jsonl file name")
     parser.add_argument("--user_prompt", type=str, 
                        default="Please repeat the following spoken content with a corresponding full-body motion sequence.",
                        help="User prompt for jsonl entries")
+    
+    # Label相关参数
+    parser.add_argument("--csv_dir", type=str, default=None,
+                       help="Directory containing CSV files with motion_start and motion_end (optional)")
+    parser.add_argument("--use_json_labels", action="store_true", default=True,
+                       help="Use JSON files for labels (default: True)")
+    parser.add_argument("--use_csv_labels", action="store_true", default=False,
+                       help="Use CSV files for labels (default: False)")
     
     args = parser.parse_args()
     
@@ -325,36 +619,9 @@ if __name__ == "__main__":
                 break
         
         # 2. 特殊处理：映射关系
-        if "internet_data_v1_kimi" in data_dir_name:
-            # internet_data_v1_kimi -> internet_data_1021
-            internet_audio_dir = os.path.join(DATA_ROOT, "internet_data_1021")
-            if os.path.exists(internet_audio_dir):
-                audio_dirs.append(internet_audio_dir)
-        
-        if "1025_60_60fps_kimi" in data_dir_name:
-            # 1025_60_60fps_kimi -> 1025_60_60fps
-            fps_audio_dir = os.path.join(DATA_ROOT, "1025_60_60fps")
-            if os.path.exists(fps_audio_dir):
-                audio_dirs.append(fps_audio_dir)
-        
-        # 3. 支持SG_2_or_3_long_sentence_1030_en_kimi自动音频处理
-        if "SG_2_or_3_long_sentence_1030_en_kimi" in data_dir_name:
-            sg_audio_dir = os.path.join(DATA_ROOT, "SG_2_or_3_long_sentence_1030_en")
-            if os.path.exists(sg_audio_dir):
-                audio_dirs.append(sg_audio_dir)
-
-        if "single_motion_sentence_version2_kimi" in data_dir_name:
-            single_motion_sentence_audio_dir = os.path.join(DATA_ROOT, "single_motion_sentence_version2")
-            if os.path.exists(single_motion_sentence_audio_dir):
-                audio_dirs.append(single_motion_sentence_audio_dir)
-           
-        
-        # 3. 尝试BEAT原始位置
-        if "BEAT" in data_dir_name:
-
-            beat_audio_dir = os.path.join(DATA_ROOT, "BEAT_v2")
-            if os.path.exists(beat_audio_dir):
-                audio_dirs.append(beat_audio_dir)
+        if "single_motion_for_tokenizer" in data_dir_name:
+            # single_motion_for_tokenizer数据集，音频在数据目录的wav文件夹下
+            audio_dirs.append(os.path.join(data_dir, "wav"))
         
         if not audio_dirs:
             print(f"⚠️  No audio directory found")
@@ -418,6 +685,55 @@ if __name__ == "__main__":
                         code_num=motion_config.get("code_num", 512)
                     )
                     
+                    # 合并body和hand tokens以计算motion_tokens长度
+                    body_tokens_array = body_tokens.cpu().numpy().reshape(-1) if isinstance(body_tokens, torch.Tensor) else np.array(body_tokens).reshape(-1)
+                    hand_tokens_array = hand_tokens.cpu().numpy().reshape(-1) if isinstance(hand_tokens, torch.Tensor) else np.array(hand_tokens).reshape(-1)
+                    max_len = max(len(body_tokens_array), len(hand_tokens_array))
+                    # motion_tokens是body和hand交替排列，所以总长度是len(body) + len(hand)
+                    motion_tokens_count = len(body_tokens_array) + len(hand_tokens_array)
+                    
+                    # 加载标签信息
+                    labels = []
+                    total_duration = None
+                    
+                    # 优先使用JSON文件
+                    if args.use_json_labels:
+                        json_path = find_json_file(base_name, data_dir, data_dir_name)
+                        if json_path:
+                            labels, total_duration = load_motion_labels_from_json(json_path, motion_tokens_count, total_duration)
+                    
+                    # 如果JSON中没有找到，尝试CSV文件
+                    if (not labels or total_duration is None) and args.use_csv_labels:
+                        csv_path = find_csv_file(base_name, data_dir, data_dir_name, args.csv_dir)
+                        if csv_path:
+                            csv_labels, csv_duration = load_motion_labels_from_csv(csv_path, motion_tokens_count, total_duration)
+                            if csv_labels:
+                                labels = csv_labels
+                            if csv_duration:
+                                total_duration = csv_duration
+                    
+                    # 如果仍然没有total_duration，尝试从音频文件获取
+                    if total_duration is None:
+                        try:
+                            import librosa
+                            audio_data, sr = librosa.load(audio_file, sr=None)
+                            total_duration = len(audio_data) / sr
+                        except:
+                            # 如果无法获取音频时长，使用motion token数量估算
+                            total_duration = motion_tokens_count / TOKENS_PER_SECOND
+                            print(f"Warning: Cannot determine duration for {base_name}, using estimated duration: {total_duration:.2f}s")
+                    
+                    # 生成label tokens
+                    # 首先需要构建完整的motion_tokens列表来计算长度
+                    motion_tokens_list = []
+                    for i in range(max_len):
+                        if i < len(body_tokens_array):
+                            motion_tokens_list.append(int(body_tokens_array[i]))
+                        if i < len(hand_tokens_array):
+                            motion_tokens_list.append(int(hand_tokens_array[i]))
+                    
+                    label_tokens = generate_label_tokens(motion_tokens_list, labels, total_duration)
+                    
                     # 保存tokens
                     body_motion_output_path = os.path.join(output_dir, base_name + '_body_tokens.pt')
                     hand_motion_output_path = os.path.join(output_dir, base_name + '_hand_tokens.pt')
@@ -430,7 +746,7 @@ if __name__ == "__main__":
                     # 🔧 创建jsonl条目（如果启用了jsonl输出）
                     if args.create_jsonl:
                         jsonl_entry = create_jsonl_entry(
-                            body_tokens, hand_tokens, audio_tokens,
+                            body_tokens, hand_tokens, audio_tokens, label_tokens,
                             base_name, data_dir, data_dir_name,
                             args.user_prompt,
                             audio_file_path=audio_file,  # 传递实际找到的音频文件路径
@@ -461,12 +777,9 @@ if __name__ == "__main__":
                 jsonl_output_filename = args.jsonl_output_name
                 if not jsonl_output_filename.endswith('.jsonl'):
                     jsonl_output_filename += '.jsonl'
-            elif data_dir_name == "BEAT_v2_kimi":
-                # BEAT_v2_kimi特殊处理：使用BEAT_v2_1110作为输出文件名
-                jsonl_output_filename = "BEAT_v2_1110_tokens.jsonl"
             else:
                 # 默认使用数据集名称
-                jsonl_output_filename = f"{data_dir_name}_tokens.jsonl"
+                jsonl_output_filename = f"{data_dir_name}_tokens_with_labels.jsonl"
             
             jsonl_output_file = os.path.join(jsonl_output_dir, jsonl_output_filename)
             
@@ -479,5 +792,6 @@ if __name__ == "__main__":
     print(f"\n{'='*80}")
     print(f"🎉 All processing completed!")
     if args.create_jsonl:
-        print(f"✅ JSONL files have been created")
-    print(f"{'='*80}") 
+        print(f"✅ JSONL files with labels have been created")
+    print(f"{'='*80}")
+

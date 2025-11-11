@@ -9,20 +9,36 @@ from queue import Queue
 from threading import Thread, Lock
 import threading
 import shutil
+import argparse
 
 # 添加HRI_retarget到Python路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'HRI_mllm/external/HRI_retarget'))
 
 from HRI_retarget.utils.io.brainco_representation import data_pkl_to_vec
 
+# 解析命令行参数
+parser = argparse.ArgumentParser(description='处理motion数据转换为joint_vec')
+parser.add_argument('--input_dir', type=str, 
+                    default="/root/workspace/HRI_MLLM/data/seg_finger_1110",
+                    help='输入数据目录路径')
+parser.add_argument('--output_dir', type=str, default=None,
+                    help='输出目录路径（默认：输入目录名_joint_vecs）')
+args = parser.parse_args()
+
 # 数据集路径
-folder_path = "/root/workspace/HRI_MLLM/data/single_motion_for_tokenizer_1108"
-tgt_dir = "/root/workspace/HRI_MLLM/data/single_motion_for_tokenizer_1108_joint_vecs"
+folder_path = args.input_dir
+if args.output_dir is None:
+    # 如果没有指定输出目录，则使用输入目录名加上_joint_vecs后缀
+    tgt_dir = folder_path + "_joint_vecs"
+else:
+    tgt_dir = args.output_dir
 # 创建3个子目录分别存放npy、json、wav文件
 npy_dir = os.path.join(tgt_dir, "npy")
 json_dir = os.path.join(tgt_dir, "json")
 wav_dir = os.path.join(tgt_dir, "wav")
-starting_time = time.time()
+
+# 全局变量：开始时间（将在主程序中初始化）
+starting_time = None
 
 # 多线程配置
 NUM_GPUS = 8
@@ -139,6 +155,12 @@ def worker(worker_id, total_num):
 
 
 if __name__ == "__main__":
+    starting_time = time.time()
+    
+    # 打印配置信息
+    print(f"输入目录: {folder_path}")
+    print(f"输出目录: {tgt_dir}")
+    
     # 创建目标目录和子目录
     os.makedirs(tgt_dir, exist_ok=True)
     os.makedirs(npy_dir, exist_ok=True)
