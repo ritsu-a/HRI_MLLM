@@ -586,11 +586,16 @@ parser.add_argument('--use_dynamic_batching', action='store_true',
 parser.add_argument('--use_balanced_sampling', action='store_true',
                    help='Use balanced sampling for single_motion action classes')
 parser.add_argument('--batch_size', type=int, default=64,
-                   help='Batch size')
+                   help='Batch size for BEAT dataset')
 parser.add_argument('--max_seq_length', type=int, default=4096,
-                   help='Maximum sequence length')
+                   help='Maximum sequence length for BEAT dataset')
 parser.add_argument('--dataset_weights', type=float, nargs='+', default=[1.0, 1.0],
                    help='Dataset weights for BEAT and single_motion')
+# single_motion 专用参数
+parser.add_argument('--single_motion_batch_size', type=int, default=256,
+                   help='Batch size for single_motion dataset')
+parser.add_argument('--single_motion_max_seq_length', type=int, default=256,
+                   help='Maximum sequence length for single_motion dataset')
 args = parser.parse_args()
 
 exp_name = "kimi_audio_motion_gpt2_brainco_finetune_beat_single_motion"
@@ -643,8 +648,10 @@ if local_rank == 0:
             "motion_vocab_size": 512*2,
             "total_vocab_size": 512*2 + 10,
             "max_seq_length": args.max_seq_length,
+            "single_motion_max_seq_length": args.single_motion_max_seq_length,
             "min_seq_length": 128,
             "batch_size": args.batch_size,
+            "single_motion_batch_size": args.single_motion_batch_size,
             "learning_rate": 1e-4,
             "epochs": args.epochs,
             "sliding_window_step": 32,
@@ -668,8 +675,10 @@ else:
         "motion_vocab_size": 512*2,
         "total_vocab_size": 512*2 + 10,
         "max_seq_length": args.max_seq_length,
+        "single_motion_max_seq_length": args.single_motion_max_seq_length,
         "min_seq_length": 128,
         "batch_size": args.batch_size,
+        "single_motion_batch_size": args.single_motion_batch_size,
         "learning_rate": 1e-4,
         "epochs": args.epochs,
         "sliding_window_step": 32,
@@ -686,9 +695,11 @@ else:
     })()
 
 # 创建模型
+# 注意：n_positions 需要与 checkpoint 保持一致（4096），否则无法加载权重
+# 训练时使用较短序列（256）不影响模型结构
 model_config = GPT2Config(
     vocab_size=config.total_vocab_size,
-    n_positions=config.max_seq_length,
+    n_positions=4096,  # 保持与原 checkpoint 一致
     n_embd=768,
     n_layer=12,
     n_head=12,
@@ -739,183 +750,121 @@ if local_rank == 0:
     model_to_watch = model.module if world_size > 1 else model
     wandb.watch(model_to_watch, log="parameters", log_freq=100)
 
-# 创建数据集
-datasets = []
-datasets_info = []
+# 创建数据集配置：为不同数据集使用不同的max_seq_length
+beat_config = type('Config', (), {
+    "jsonl_files": config.jsonl_files,
+    "audio_vocab_size": config.audio_vocab_size,
+    "motion_vocab_size": config.motion_vocab_size,
+    "total_vocab_size": config.total_vocab_size,
+    "max_seq_length": 256,  # BEAT裁剪到256
+    "min_seq_length": config.min_seq_length,
+    "batch_size": config.batch_size,
+    "learning_rate": config.learning_rate,
+    "epochs": config.epochs,
+    "sliding_window_step": config.sliding_window_step,
+    "pad_token_id": config.pad_token_id,
+    "gesture_start_token_id": config.gesture_start_token_id,
+    "audio_gesture_start_token_id": config.audio_gesture_start_token_id,
+    "gesture_end_token_id": config.gesture_end_token_id,
+    "audio_gesture_end_token_id": config.audio_gesture_end_token_id,
+    "interleave_ratio": config.interleave_ratio,
+    "exp_name": config.exp_name,
+})()
+
+single_motion_config = type('Config', (), {
+    "jsonl_files": config.jsonl_files,
+    "audio_vocab_size": config.audio_vocab_size,
+    "motion_vocab_size": config.motion_vocab_size,
+    "total_vocab_size": config.total_vocab_size,
+    "max_seq_length": args.single_motion_max_seq_length,  # single_motion使用256
+    "min_seq_length": config.min_seq_length,
+    "batch_size": config.batch_size,
+    "learning_rate": config.learning_rate,
+    "epochs": config.epochs,
+    "sliding_window_step": config.sliding_window_step,
+    "pad_token_id": config.pad_token_id,
+    "gesture_start_token_id": config.gesture_start_token_id,
+    "audio_gesture_start_token_id": config.audio_gesture_start_token_id,
+    "gesture_end_token_id": config.gesture_end_token_id,
+    "audio_gesture_end_token_id": config.audio_gesture_end_token_id,
+    "interleave_ratio": config.interleave_ratio,
+    "exp_name": config.exp_name,
+})()
+
+# 创建独立的数据集（beat和single_motion）
+beat_dataset = None
+single_motion_dataset = None
+
 for idx, jsonl_path in enumerate(config.jsonl_files):
     if os.path.exists(jsonl_path):
         dataset_name = list(all_jsonl_files.keys())[idx]
         extract_action_class = (dataset_name == "single_motion") and args.use_balanced_sampling
-        dataset = JSONLAudioMotionDataset(jsonl_path, config, extract_action_class=extract_action_class, dataset_name=dataset_name)
-        datasets_info.append((dataset, jsonl_path, dataset_name))
         
-        datasets.append(dataset)
+        # 根据数据集选择配置
+        if dataset_name == "BEAT":
+            dataset_config = beat_config
+        else:
+            dataset_config = single_motion_config
         
-        if local_rank == 0:
-            print(f"Loaded {len(dataset)} samples from {jsonl_path} ({dataset_name})")
+        dataset = JSONLAudioMotionDataset(jsonl_path, dataset_config, extract_action_class=extract_action_class, dataset_name=dataset_name)
+        
+        if dataset_name == "BEAT":
+            beat_dataset = dataset
+            if local_rank == 0:
+                print(f"Loaded {len(dataset)} samples from {jsonl_path} ({dataset_name}) [max_seq_length={dataset_config.max_seq_length}]")
+        elif dataset_name == "single_motion":
+            single_motion_dataset = dataset
+            if local_rank == 0:
+                print(f"Loaded {len(dataset)} samples from {jsonl_path} ({dataset_name}) [max_seq_length={dataset_config.max_seq_length}]")
     else:
         if local_rank == 0:
             print(f"Warning: {jsonl_path} not found, skipping...")
 
-if len(datasets) == 0:
+if beat_dataset is None or single_motion_dataset is None:
     if local_rank == 0:
-        print("❌ No valid JSONL files found!")
+        print("❌ Both BEAT and single_motion datasets are required!")
     exit(1)
 
-# 合并数据集
-if len(datasets) == 1:
-    dataset = datasets[0]
-else:
-    dataset = ConcatDataset(datasets)
-    if local_rank == 0:
-        print(f"Concatenated {len(datasets)} datasets, total samples: {len(dataset)}")
-
-# 创建Sampler和DataLoader
-if args.use_dynamic_batching:
-    # 使用按长度分组的BatchSampler
-    length_bins = [
-        (0, 512),
-        (512, 1024),
-        (1024, 2048),
-        (2048, 4096),
-    ]
-    batch_sampler = LengthBasedBatchSampler(
-        dataset,
-        batch_size=config.batch_size // world_size,
-        length_bins=length_bins,
-        shuffle=True,
-        datasets=datasets if len(datasets) > 1 else None,
-        dataset_weights=args.dataset_weights if (args.dataset_weights and len(args.dataset_weights) == len(datasets)) else None
-    )
-    sampler = None
-    batch_sampler_instance = batch_sampler
-    collate_fn = DynamicCollateFn(config.pad_token_id, config.max_seq_length)
-else:
-    # 使用标准sampling
-    if args.use_balanced_sampling and len(datasets) > 1:
-        # 对single_motion数据集使用平衡采样
-        single_motion_dataset = datasets[1]
-        # 计算每个类别的采样数量（基于BEAT数据集大小）
-        beat_size = len(datasets[0])
-        samples_per_class = beat_size // 7  # 假设有7个动作类别
-        balanced_sampler = BalancedActionClassSampler(single_motion_dataset, samples_per_class=samples_per_class, shuffle=True)
-        
-        # 对于BEAT数据集，使用标准sampler
-        if world_size > 1:
-            beat_sampler = DistributedSampler(
-                datasets[0],
-                num_replicas=world_size,
-                rank=local_rank,
-                shuffle=True
-            )
-        else:
-            beat_sampler = torch.utils.data.RandomSampler(datasets[0])
-        
-        # 创建组合sampler（混合采样两个数据集）
-        class CombinedSampler(Sampler):
-            def __init__(self, beat_sampler, balanced_sampler, beat_size, balanced_size):
-                self.beat_sampler = beat_sampler
-                self.balanced_sampler = balanced_sampler
-                self.beat_size = beat_size
-                self.balanced_size = balanced_size
-                self.total_size = beat_size + balanced_size
-            
-            def __iter__(self):
-                beat_iter = iter(self.beat_sampler)
-                balanced_iter = iter(self.balanced_sampler)
-                # 混合采样，但需要考虑数据集偏移
-                indices = []
-                try:
-                    for _ in range(self.beat_size):
-                        beat_idx = next(beat_iter)
-                        indices.append(beat_idx)  # BEAT数据集在前
-                except StopIteration:
-                    pass
-                try:
-                    for balanced_idx in balanced_iter:
-                        indices.append(self.beat_size + balanced_idx)  # single_motion数据集在后
-                except StopIteration:
-                    pass
-                random.shuffle(indices)
-                return iter(indices)
-            
-            def __len__(self):
-                return self.total_size
-            
-            def set_epoch(self, epoch):
-                """设置epoch，用于DistributedSampler"""
-                if hasattr(self.beat_sampler, 'set_epoch'):
-                    self.beat_sampler.set_epoch(epoch)
-                # BalancedActionClassSampler不需要set_epoch，因为它每次__iter__都会重新采样
-        
-        sampler = CombinedSampler(beat_sampler, balanced_sampler, len(datasets[0]), len(balanced_sampler))
-        batch_sampler_instance = None
-    else:
-        # 使用加权采样（根据dataset_weights控制采样比例）
-        if len(datasets) > 1 and args.dataset_weights and len(args.dataset_weights) == len(datasets):
-            # 检查权重是否相等（如果相等，使用标准采样）
-            weights_equal = all(w == args.dataset_weights[0] for w in args.dataset_weights)
-            if not weights_equal:
-                # 使用加权采样
-                sampler = WeightedDatasetSampler(
-                    datasets=datasets,
-                    dataset_weights=args.dataset_weights,
-                    replacement=True,  # 允许有放回采样，以便控制采样比例
-                    shuffle=True,
-                    rank=local_rank,
-                    world_size=world_size
-                )
-                batch_sampler_instance = None
-            else:
-                # 权重相等，使用标准采样
-                if world_size > 1:
-                    sampler = DistributedSampler(
-                        dataset,
-                        num_replicas=world_size,
-                        rank=local_rank,
-                        shuffle=True
-                    )
-                else:
-                    sampler = None
-                batch_sampler_instance = None
-        else:
-            # 单个数据集或未指定权重，使用标准采样
-            if world_size > 1:
-                sampler = DistributedSampler(
-                    dataset,
-                    num_replicas=world_size,
-                    rank=local_rank,
-                    shuffle=True
-                )
-            else:
-                sampler = None
-            batch_sampler_instance = None
+# 创建single_motion的子采样Dataset
+class SubsampledDataset(Dataset):
+    """每个epoch随机采样部分数据的Dataset"""
+    def __init__(self, base_dataset, sample_ratio=0.05):
+        self.base_dataset = base_dataset
+        self.sample_ratio = sample_ratio
+        self.epoch = 0
+        self._resample()
     
-    def collate_fn(batch):
-        tokens = torch.stack([item['tokens'] for item in batch]).long()
-        masks = torch.stack([item['mask'] for item in batch]).long()
-        lengths = torch.tensor([item['seq_length'] for item in batch])
-        return {'tokens': tokens, 'mask': masks, 'lengths': lengths}
+    def _resample(self):
+        """重新采样"""
+        total_size = len(self.base_dataset)
+        sample_size = int(total_size * self.sample_ratio)
+        # 使用epoch作为随机种子，确保每个epoch的采样不同
+        random.seed(self.epoch)
+        self.indices = random.sample(range(total_size), sample_size)
+        random.seed()  # 重置随机种子
+    
+    def set_epoch(self, epoch):
+        """设置epoch并重新采样"""
+        self.epoch = epoch
+        self._resample()
+    
+    def __len__(self):
+        return len(self.indices)
+    
+    def __getitem__(self, idx):
+        return self.base_dataset[self.indices[idx]]
 
-# 创建DataLoader
-if batch_sampler_instance is not None:
-    dataloader = DataLoader(
-        dataset,
-        batch_sampler=batch_sampler_instance,
-        collate_fn=collate_fn,
-        pin_memory=True,
-        num_workers=4
-    )
-else:
-    dataloader = DataLoader(
-        dataset,
-        batch_size=config.batch_size // world_size,
-        sampler=sampler,
-        collate_fn=collate_fn,
-        pin_memory=True,
-        num_workers=4,
-        shuffle=(sampler is None)
-    )
+# 创建single_motion的子采样数据集（1/3 ≈ 0.333）
+single_motion_subsampled = SubsampledDataset(single_motion_dataset, sample_ratio=1/3)
+
+if local_rank == 0:
+    print(f"\nSingle_motion subsampling: {len(single_motion_dataset)} -> {len(single_motion_subsampled)} samples (1/3)")
+
+# 合并数据集
+combined_dataset = ConcatDataset([beat_dataset, single_motion_subsampled])
+if local_rank == 0:
+    print(f"Combined dataset: {len(combined_dataset)} samples (BEAT: {len(beat_dataset)}, single_motion: {len(single_motion_subsampled)})")
+    print(f"All sequences max_length: 256")
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
 
@@ -924,6 +873,36 @@ if args.resume_from and os.path.exists(args.resume_from):
     if 'optimizer' in checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer'])
 
+# 创建DataLoader
+if world_size > 1:
+    sampler = DistributedSampler(
+        combined_dataset,
+        num_replicas=world_size,
+        rank=local_rank,
+        shuffle=True
+    )
+else:
+    sampler = None
+
+def collate_fn(batch):
+    tokens = torch.stack([item['tokens'] for item in batch]).long()
+    masks = torch.stack([item['mask'] for item in batch]).long()
+    lengths = torch.tensor([item['seq_length'] for item in batch])
+    return {'tokens': tokens, 'mask': masks, 'lengths': lengths}
+
+dataloader = DataLoader(
+    combined_dataset,
+    batch_size=config.batch_size // world_size,
+    sampler=sampler,
+    collate_fn=collate_fn,
+    pin_memory=True,
+    num_workers=4,
+    shuffle=(sampler is None)
+)
+
+if local_rank == 0:
+    print(f"Estimated steps per epoch: {len(dataloader)}")
+
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
     optimizer,
     max_lr=config.learning_rate,
@@ -931,25 +910,36 @@ scheduler = torch.optim.lr_scheduler.OneCycleLR(
     epochs=config.epochs
 )
 
-accum_steps = 4 if config.max_seq_length > 1024 else 1
+accum_steps = 1  # 序列长度统一为256，不需要梯度累积
+
+# 用于跟踪全局step数
+global_step = 0
 
 if local_rank == 0:
     print(f"\n🚀 Starting finetuning from epoch {start_epoch} to {config.epochs}")
     print(f"   Total epochs to train: {config.epochs - start_epoch}")
-    print(f"   Use dynamic batching: {args.use_dynamic_batching}")
-    print(f"   Use balanced sampling: {args.use_balanced_sampling}")
-    print(f"   Dataset weights: {config.dataset_weights}")
+    print(f"   Training strategy: BEAT + single_motion (1/3 subsampled) combined")
+    print(f"   Config: max_seq_length=256, batch_size={config.batch_size}, accum_steps={accum_steps}")
+    print(f"   BEAT samples: {len(beat_dataset)}")
+    print(f"   single_motion samples per epoch: {len(single_motion_subsampled)} (1/3 of {len(single_motion_dataset)})")
     print(f"{'='*80}\n")
 
 for epoch in range(start_epoch, config.epochs):
+    # 每个epoch重新采样single_motion数据集
+    single_motion_subsampled.set_epoch(epoch)
+    
+    if local_rank == 0:
+        print(f"\n📊 Epoch {epoch+1}/{config.epochs}")
+        print(f"   Combined dataset size: {len(combined_dataset)} samples")
+        print(f"   Batches: {len(dataloader)}")
+    
+    # 设置sampler的epoch（确保每个epoch的shuffle不同）
+    if sampler is not None:
+        sampler.set_epoch(epoch)
+    
     model.train()
     total_loss = 0
     optimizer.zero_grad()
-    
-    if sampler is not None and hasattr(sampler, 'set_epoch'):
-        sampler.set_epoch(epoch)
-    
-    # BalancedActionClassSampler会在每个epoch的__iter__中重新采样，无需额外处理
     
     if local_rank == 0:
         dataloader_iter = tqdm(dataloader, desc=f"Epoch {epoch+1}/{config.epochs}")
@@ -976,6 +966,8 @@ for epoch in range(start_epoch, config.epochs):
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
+            # 更新全局step（只在accum_steps的倍数时更新，因为optimizer.step()和scheduler.step()只在此时调用）
+            global_step += 1
         
         total_loss += loss.item() * accum_steps
         
@@ -995,7 +987,8 @@ for epoch in range(start_epoch, config.epochs):
                 "train/seq_length": lengths.float().mean().item(),
                 "train/seq_length_min": lengths.min().item(),
                 "train/seq_length_max": lengths.max().item(),
-                "train/step": epoch * len(dataloader) + step,
+                "train/step": global_step,
+                "train/epoch": epoch,
                 "train/memory_allocated": torch.cuda.memory_allocated(device) / 1024**3,
                 "train/memory_reserved": torch.cuda.memory_reserved(device) / 1024**3,
             }
@@ -1007,8 +1000,12 @@ for epoch in range(start_epoch, config.epochs):
     
     if local_rank == 0:
         avg_loss = total_loss / len(dataloader)
-        wandb.log({"epoch/loss": avg_loss, "epoch": epoch})
-        print(f"Epoch {epoch+1}/{config.epochs} | Loss: {avg_loss:.4f}")
+        wandb.log({
+            "epoch/loss": avg_loss,
+            "epoch": epoch,
+            "epoch/step": global_step,
+        })
+        print(f"Epoch {epoch+1}/{config.epochs} | Loss: {avg_loss:.4f} | Steps: {len(dataloader)}")
         
         if (epoch + 1) % 50 == 0:
             ckpt_path = f"output/motion_adaptor_v10/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"

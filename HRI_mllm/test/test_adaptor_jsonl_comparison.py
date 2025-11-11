@@ -41,6 +41,7 @@ import torch
 import yaml
 import random
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -53,7 +54,6 @@ from HRI_mllm.utils.motion_utils.g1ml3d_final import load_normalization_stats
 from HRI_mllm.model.motion_encoder.vqvae_body_hand import VQVaeBodyHand
 from HRI_mllm.external.HRI_retarget.HRI_retarget.utils.io.motion_pkl_to_csv import load_motion_pkl_as_csv_data
 from HRI_mllm.external.GMR.scripts.vis_csv_motion import vis_audio_motion
-from HRI_mllm.test.merge_videos import merge_three_videos
 
 from transformers import GPT2Config, GPT2LMHeadModel, AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from HRI_mllm.model.gpt2_adaptor.model import MixedInputGPT2
@@ -440,6 +440,128 @@ def compute_token_accuracy(predicted, ground_truth):
     
     correct = sum(1 for p, g in zip(predicted, ground_truth) if p == g)
     return correct / min_len if min_len > 0 else 0.0
+
+
+def merge_three_videos(v0, v1, v2, out_path, layout="hstack", height=720, crf=18, 
+                       preset="veryfast", copy_first_audio=True, 
+                       label0="GT", label1="Teacher-Forcing", label2="Free-Running",
+                       fontfile=None, fontsize=36, fontcolor="white",
+                       box=True, boxcolor="black@0.5", boxborderw=10):
+    """
+    使用ffmpeg将三个视频横向合并，并在每个视频上添加文字标签
+    
+    参数:
+        v0, v1, v2: 三个输入视频路径
+        out_path: 输出视频路径
+        layout: 布局方式，"hstack"表示横向排列，"vstack"表示纵向排列
+        height: 输出视频高度
+        crf: 视频质量参数，值越小质量越高（默认18）
+        preset: 编码速度预设（ultrafast, veryfast, fast, medium, slow等）
+        copy_first_audio: 是否使用第一个视频的音频
+        label0, label1, label2: 三个视频的标签文字
+        fontfile: 字体文件路径，如果为None则使用系统默认字体
+        fontsize: 字体大小
+        fontcolor: 字体颜色
+        box: 是否添加文字背景框
+        boxcolor: 背景框颜色
+        boxborderw: 背景框边框宽度
+    """
+    # 检查输入文件是否存在
+    for video_path in [v0, v1, v2]:
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"视频文件不存在: {video_path}")
+    
+    # 构建drawtext滤镜参数
+    def build_drawtext_filter(text):
+        """构建drawtext滤镜字符串"""
+        dt_params = [
+            f"text='{text}'",
+            f"fontsize={fontsize}",
+            f"fontcolor={fontcolor}",
+            "x=(w-text_w)/2",  # 水平居中
+            "y=30"  # 距离顶部30像素
+        ]
+        
+        if fontfile and os.path.exists(fontfile):
+            dt_params.append(f"fontfile='{fontfile}'")
+        
+        if box:
+            dt_params.extend([
+                "box=1",
+                f"boxcolor={boxcolor}",
+                f"boxborderw={boxborderw}"
+            ])
+        
+        return "drawtext=" + ":".join(dt_params)
+    
+    # 构建ffmpeg命令
+    if layout == "hstack":
+        # 横向合并
+        filter_complex = (
+            f"[0:v]scale=-1:{height}[v0scaled];"
+            f"[1:v]scale=-1:{height}[v1scaled];"
+            f"[2:v]scale=-1:{height}[v2scaled];"
+            f"[v0scaled]{build_drawtext_filter(label0)}[v0text];"
+            f"[v1scaled]{build_drawtext_filter(label1)}[v1text];"
+            f"[v2scaled]{build_drawtext_filter(label2)}[v2text];"
+            f"[v0text][v1text][v2text]hstack=inputs=3[outv]"
+        )
+    elif layout == "vstack":
+        # 纵向合并
+        filter_complex = (
+            f"[0:v]scale=-1:{height}[v0scaled];"
+            f"[1:v]scale=-1:{height}[v1scaled];"
+            f"[2:v]scale=-1:{height}[v2scaled];"
+            f"[v0scaled]{build_drawtext_filter(label0)}[v0text];"
+            f"[v1scaled]{build_drawtext_filter(label1)}[v1text];"
+            f"[v2scaled]{build_drawtext_filter(label2)}[v2text];"
+            f"[v0text][v1text][v2text]vstack=inputs=3[outv]"
+        )
+    else:
+        raise ValueError(f"不支持的布局方式: {layout}")
+    
+    # 构建完整的ffmpeg命令
+    cmd = [
+        "ffmpeg",
+        "-y",  # 覆盖输出文件
+        "-i", v0,
+        "-i", v1,
+        "-i", v2,
+        "-filter_complex", filter_complex,
+        "-map", "[outv]"
+    ]
+    
+    # 添加音频
+    if copy_first_audio:
+        cmd.extend(["-map", "0:a?"])  # 复制第一个视频的音频（如果存在）
+    
+    # 添加编码参数
+    cmd.extend([
+        "-c:v", "libx264",
+        "-crf", str(crf),
+        "-preset", preset,
+        "-c:a", "aac",
+        "-b:a", "192k",
+        out_path
+    ])
+    
+    # 执行ffmpeg命令
+    print(f"正在合并视频...")
+    print(f"命令: {' '.join(cmd)}")
+    
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True
+        )
+        print(f"✅ 视频合并成功: {out_path}")
+    except subprocess.CalledProcessError as e:
+        print(f"❌ ffmpeg执行失败:")
+        print(f"错误信息: {e.stderr}")
+        raise
 
 
 def main():

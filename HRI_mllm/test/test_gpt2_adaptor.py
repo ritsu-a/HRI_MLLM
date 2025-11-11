@@ -323,9 +323,9 @@ def audioToken2motionPkl(audio_codes, motion_tokens_gt):
         audio_codes.squeeze(0), 
         device="cuda",
         max_new_tokens=4096,
-        temperature=0.0,
-        top_k=1,
-        repetition_penalty=1.0
+        temperature=0.5,
+        top_k=50,
+        repetition_penalty=1.6
     )
     
     # 解码motion tokens为motion data

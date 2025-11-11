@@ -81,17 +81,17 @@ Finetune Motion Adaptor on single motion:
 
 Test Motion Adaptor on BEAT and single motion:
     python HRI_mllm/test/test_adaptor_jsonl_comparison.py \
-    --jsonl_path /root/workspace/HRI_MLLM/data/single_motion_for_tokenizer_1108_tokens_with_labels.jsonl \
-    --motion_adaptor_path output/motion_adaptor_v10/kimi_audio_motion_gpt2_brainco_synthetic_en/checkpoints/epoch_1200.pt \
+    --jsonl_path /root/workspace/HRI_MLLM/data/BEAT_v2_1110_tokens.jsonl \
+    --motion_adaptor_path /root/workspace/HRI_MLLM/output/motion_adaptor_v10/kimi_audio_motion_gpt2_brainco_synthetic_en/checkpoints/epoch_1700.pt \
     --vqvae_config g1_vqvae_arbitrary_length_balanced.yaml \
     --vqvae_checkpoint output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt \
     --output_dir ./adaptor_comparison_results \
-    --num_samples 5 \
-    --temperature 0.0 \
-    --top_k 1 \
-    --repetition_penalty 1.0
+    --num_samples 50 \
+    --temperature 1.2 \
+    --top_k 100 \
+    --repetition_penalty 1.5
 
 
 
 Test Motion Adaptor on single motion:
-    python HRI_mllm/test/test_gpt2_adaptor.py 
+    python HRI_mllm/test/test_gpt2_adaptor.py --audio_path 
