@@ -95,3 +95,11 @@ Test Motion Adaptor on BEAT and single motion:
 
 Test Motion Adaptor on single motion:
     python HRI_mllm/test/test_gpt2_adaptor.py --audio_path 
+
+
+
+Train on QA data:
+    bash scripts/train_8gpu.sh
+
+Test on QA data:
+    bash scripts/quick_test.sh
