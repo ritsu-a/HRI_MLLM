@@ -22,6 +22,8 @@ class JSONLAudioMotionDataset(Dataset):
         self.config = config
         self.jsonl_path = jsonl_path
         self.dataset_name = dataset_name
+        self.current_epoch = 0
+        self.source_id = 0 if dataset_name == "BEAT" else 1
         self.samples = []
         self.action_classes = []  # 存储每个样本的动作类别
         self.seq_lengths = []  # 存储每个样本的序列长度
@@ -29,106 +31,163 @@ class JSONLAudioMotionDataset(Dataset):
         self.interleave_audios, self.interleave_motions = config.interleave_ratio
         self.SEQ_PAD_TOKEN = config.pad_token_id
         self.extract_action_class = extract_action_class
+        self.concat_samples = getattr(config, 'concat_samples', False)
+        self.target_concat_length = getattr(config, 'target_concat_length', config.max_seq_length)
+        self.sliding_window_step = getattr(config, 'sliding_window_step', config.max_seq_length)
+        self.raw_samples = []
         
         print(f"Loading JSONL file: {jsonl_path}")
         
         # 读取JSONL文件
         with open(jsonl_path, 'r', encoding='utf-8') as f:
             for line_num, line in enumerate(f):
+                line = line.strip()
+                if not line:
+                    continue
                 try:
-                    data = json.loads(line.strip())
-                    
-                    # 从conversation中提取audio和motion tokens
-                    audio_tokens = None
-                    motion_tokens = None
-                    motion_labels = None
-                    action_class = None
-                    
-                    for msg in data['conversation']:
-                        if msg.get('message_type') == 'audio' and 'audio_tokens' in msg:
-                            audio_tokens = msg['audio_tokens']
-                            # 从audio文件路径提取动作类别
-                            if self.extract_action_class:
-                                audio_path = msg.get('content', '')
-                                if '/' in audio_path:
-                                    filename = audio_path.split('/')[-1]
-                                    if '_' in filename:
-                                        # 提取动作类别（前两部分，如 FIST_BEAT）
-                                        parts = filename.split('_')
-                                        if len(parts) >= 2:
-                                            action_class = f"{parts[0]}_{parts[1]}"
-                        elif msg.get('message_type') == 'audio_motion' and 'motion_tokens' in msg:
-                            motion_tokens = msg['motion_tokens']
-                    
-                    # 读取motion_labels（如果存在）
-                    if 'motion_labels' in data:
-                        motion_labels = data['motion_labels']
-                    
-                    if audio_tokens is None or motion_tokens is None:
-                        continue
-                    
-                    # 转换为torch tensor
-                    if not isinstance(audio_tokens, torch.Tensor):
-                        audio_tokens = torch.tensor(audio_tokens)
-                    if not isinstance(motion_tokens, torch.Tensor):
-                        motion_tokens = torch.tensor(motion_tokens)
-                    
-                    # 构建motion_tokens中需要插入特殊token的位置集合
-                    gesture_start_indices = set()
-                    gesture_end_indices = set()
-                    if motion_labels:
-                        for label in motion_labels:
-                            if 'start_token_index' in label:
-                                gesture_start_indices.add(label['start_token_index'])
-                            if 'end_token_index' in label:
-                                gesture_end_indices.add(label['end_token_index'])
-                    
-                    # 构建完整序列（带特殊token）
-                    full_sequence = []
-                    token_types = []
-                    
-                    # 跟踪当前在motion_tokens中的索引
-                    motion_token_idx = 0
-                    
-                    for i in range(len(audio_tokens)):
-                        # 插入audio token
-                        full_sequence.append(audio_tokens[i].item())
-                        token_types.append(0)
-                        
-                        # 根据interleave_ratio插入motion tokens
-                        if (i + 1) % self.interleave_audios == 0:
-                            motion_block_size = self.interleave_motions
-                            for j in range(motion_block_size):
-                                if motion_token_idx < len(motion_tokens):
-                                    # 检查是否是gesture_start
-                                    if motion_token_idx in gesture_start_indices:
-                                        full_sequence.append(self.config.gesture_start_token_id)
-                                        token_types.append(1)
-                                        full_sequence.append(self.config.audio_gesture_start_token_id)
-                                        token_types.append(0)
-                                    
-                                    # 插入motion token
-                                    full_sequence.append(motion_tokens[motion_token_idx].item())
-                                    token_types.append(1)
-                                    
-                                    # 检查是否是gesture_end
-                                    if motion_token_idx in gesture_end_indices:
-                                        full_sequence.append(self.config.gesture_end_token_id)
-                                        token_types.append(1)
-                                        full_sequence.append(self.config.audio_gesture_end_token_id)
-                                        token_types.append(0)
-                                    
-                                    motion_token_idx += 1
-                    
-                    # 处理剩余的motion tokens
-                    while motion_token_idx < len(motion_tokens):
+                    data = json.loads(line)
+                    sample = self._extract_sample_from_json(data)
+                    if sample:
+                        self.raw_samples.append(sample)
+                except Exception as e:
+                    print(f"Error processing line {line_num} in {jsonl_path}: {e}")
+                    continue
+        
+        # 首次构建样本（不指定epoch）
+        self._rebuild_samples(epoch=None)
+        
+        print(f"Loaded {len(self.samples)} samples from {jsonl_path}")
+        if self.extract_action_class:
+            action_counts = defaultdict(int)
+            for ac in self.action_classes:
+                if ac:
+                    action_counts[ac] += 1
+            print(f"Action class distribution: {dict(action_counts)}")
+
+    def _rebuild_samples(self, epoch: Optional[int]):
+        """按当前配置重建样本；若启用拼接，则每次重建都会重新随机化顺序"""
+        # 清空现有样本与统计
+        self.samples = []
+        self.action_classes = []
+        self.seq_lengths = []
+        self.stats = {'total_sequences': 0, 'generated_samples': 0, 'max_length': 0}
+        
+        if not self.concat_samples:
+            for sample in self.raw_samples:
+                self._add_sequence(sample['audio_tokens'], sample['motion_tokens'], sample['motion_labels'], sample['action_class'])
+            return
+        
+        # 可重复的随机：若提供了epoch，则用其作为种子扰动
+        rng = random.Random()
+        if epoch is not None:
+            rng.seed(epoch + 1337)
+        shuffled = self.raw_samples[:]
+        rng.shuffle(shuffled)
+        
+        buffer_audio, buffer_motion, buffer_labels = [], [], []
+        for sample in shuffled:
+            audio_tokens = sample['audio_tokens']
+            motion_tokens = sample['motion_tokens']
+            motion_labels = sample['motion_labels']
+            
+            motion_offset = len(buffer_motion)
+            buffer_audio.extend(audio_tokens)
+            buffer_motion.extend(motion_tokens)
+            
+            if motion_labels:
+                for label in motion_labels:
+                    new_label = dict(label)
+                    if 'start_token_index' in new_label:
+                        new_label['start_token_index'] += motion_offset
+                    if 'end_token_index' in new_label:
+                        new_label['end_token_index'] += motion_offset
+                    buffer_labels.append(new_label)
+            
+            if len(buffer_audio) + len(buffer_motion) >= self.target_concat_length:
+                self._add_sequence(buffer_audio, buffer_motion, buffer_labels, None)
+                buffer_audio, buffer_motion, buffer_labels = [], [], []
+        
+        if buffer_audio and buffer_motion:
+            self._add_sequence(buffer_audio, buffer_motion, buffer_labels, None)
+
+    def set_epoch(self, epoch: int):
+        """当启用拼接时，每个epoch重建一次拼接顺序以制造新样本排列"""
+        self.current_epoch = epoch
+        if self.concat_samples:
+            self._rebuild_samples(epoch=epoch)
+
+    def _extract_sample_from_json(self, data):
+        audio_tokens = None
+        motion_tokens = None
+        motion_labels = data.get('motion_labels')
+        action_class = None
+        
+        for msg in data.get('conversation', []):
+            if msg.get('message_type') == 'audio' and 'audio_tokens' in msg:
+                audio_tokens = msg['audio_tokens']
+                if self.extract_action_class:
+                    audio_path = msg.get('content', '')
+                    if '/' in audio_path:
+                        filename = audio_path.split('/')[-1]
+                        if '_' in filename:
+                            parts = filename.split('_')
+                            if len(parts) >= 2:
+                                action_class = f"{parts[0]}_{parts[1]}"
+            elif msg.get('message_type') == 'audio_motion' and 'motion_tokens' in msg:
+                motion_tokens = msg['motion_tokens']
+        
+        if audio_tokens is None or motion_tokens is None:
+            return None
+        
+        audio_tokens = self._ensure_list(audio_tokens)
+        motion_tokens = self._ensure_list(motion_tokens)
+        
+        return {
+            'audio_tokens': audio_tokens,
+            'motion_tokens': motion_tokens,
+            'motion_labels': motion_labels,
+            'action_class': action_class,
+        }
+
+    def _ensure_list(self, tokens):
+        if isinstance(tokens, torch.Tensor):
+            return tokens.clone().detach().tolist()
+        if isinstance(tokens, np.ndarray):
+            return tokens.tolist()
+        return list(tokens)
+
+    def _add_sequence(self, audio_tokens, motion_tokens, motion_labels, action_class):
+        if not audio_tokens or not motion_tokens:
+            return
+        
+        gesture_start_indices = set()
+        gesture_end_indices = set()
+        if motion_labels:
+            for label in motion_labels:
+                if 'start_token_index' in label:
+                    gesture_start_indices.add(label['start_token_index'])
+                if 'end_token_index' in label:
+                    gesture_end_indices.add(label['end_token_index'])
+        
+        full_sequence = []
+        token_types = []
+        motion_token_idx = 0
+        
+        for i in range(len(audio_tokens)):
+            full_sequence.append(int(audio_tokens[i]))
+            token_types.append(0)
+            
+            if (i + 1) % self.interleave_audios == 0:
+                motion_block_size = self.interleave_motions
+                for _ in range(motion_block_size):
+                    if motion_token_idx < len(motion_tokens):
                         if motion_token_idx in gesture_start_indices:
                             full_sequence.append(self.config.gesture_start_token_id)
                             token_types.append(1)
                             full_sequence.append(self.config.audio_gesture_start_token_id)
                             token_types.append(0)
                         
-                        full_sequence.append(motion_tokens[motion_token_idx].item())
+                        full_sequence.append(int(motion_tokens[motion_token_idx]))
                         token_types.append(1)
                         
                         if motion_token_idx in gesture_end_indices:
@@ -138,54 +197,53 @@ class JSONLAudioMotionDataset(Dataset):
                             token_types.append(0)
                         
                         motion_token_idx += 1
-                    
-                    # 应用滑动窗口
-                    sample_indices = self.apply_sliding_window(full_sequence, token_types, action_class)
-                    self.stats['total_sequences'] += 1
-                    
-                except Exception as e:
-                    print(f"Error processing line {line_num} in {jsonl_path}: {e}")
-                    continue
         
-        print(f"Loaded {len(self.samples)} samples from {jsonl_path}")
-        if self.extract_action_class:
-            action_counts = defaultdict(int)
-            for ac in self.action_classes:
-                if ac:
-                    action_counts[ac] += 1
-            print(f"Action class distribution: {dict(action_counts)}")
+        while motion_token_idx < len(motion_tokens):
+            if motion_token_idx in gesture_start_indices:
+                full_sequence.append(self.config.gesture_start_token_id)
+                token_types.append(1)
+                full_sequence.append(self.config.audio_gesture_start_token_id)
+                token_types.append(0)
+            
+            full_sequence.append(int(motion_tokens[motion_token_idx]))
+            token_types.append(1)
+            
+            if motion_token_idx in gesture_end_indices:
+                full_sequence.append(self.config.gesture_end_token_id)
+                token_types.append(1)
+                full_sequence.append(self.config.audio_gesture_end_token_id)
+                token_types.append(0)
+            
+            motion_token_idx += 1
+        
+        self.apply_sliding_window(full_sequence, token_types, action_class)
+        self.stats['total_sequences'] += 1
     
     def apply_sliding_window(self, full_seq, token_types, action_class=None):
-        """应用滑动窗口，返回生成的样本索引"""
-        seq_len = len(full_seq)
-        sample_indices = []
-        
-        if seq_len > self.config.max_seq_length:
-            return sample_indices
-        
-        sub_seq = full_seq
-        sub_types = token_types
-        
+        """（已移除滑窗）仅生成单一样本：将序列截断到 max_seq_length"""
+        max_len = self.config.max_seq_length
+        sub_seq = full_seq[:max_len]
+        sub_types = token_types[:max_len]
         mask = [1 if t == 1 else 0 for t in sub_types]
         
-        padded_seq = sub_seq + [self.SEQ_PAD_TOKEN] * (self.config.max_seq_length - len(sub_seq))
-        padded_mask = mask + [0] * (self.config.max_seq_length - len(mask))
+        padded_seq = sub_seq + [self.SEQ_PAD_TOKEN] * (max_len - len(sub_seq))
+        padded_mask = mask + [0] * (max_len - len(mask))
         
         sample_idx = len(self.samples)
         seq_length = len(sub_seq)
         self.samples.append({
             'tokens': torch.tensor(padded_seq),
             'mask': torch.tensor(padded_mask),
-            'seq_length': seq_length
+            'seq_length': seq_length,
+            'source_id': self.source_id
         })
         self.action_classes.append(action_class)
         self.seq_lengths.append(seq_length)
-        sample_indices.append(sample_idx)
         
         self.stats['generated_samples'] += 1
         self.stats['max_length'] = max(self.stats['max_length'], seq_length)
         
-        return sample_indices
+        return [sample_idx]
     
     def __len__(self):
         return len(self.samples)
@@ -585,6 +643,8 @@ parser.add_argument('--use_dynamic_batching', action='store_true',
                    help='Use dynamic batching based on sequence length')
 parser.add_argument('--use_balanced_sampling', action='store_true',
                    help='Use balanced sampling for single_motion action classes')
+parser.add_argument('--use_weighted_datasets', action='store_true',
+                   help='Use weighted dataset sampler to balance BEAT and single_motion per-epoch sampling')
 parser.add_argument('--batch_size', type=int, default=64,
                    help='Batch size for BEAT dataset')
 parser.add_argument('--max_seq_length', type=int, default=4096,
@@ -594,13 +654,13 @@ parser.add_argument('--dataset_weights', type=float, nargs='+', default=[1.0, 1.
 # single_motion 专用参数
 parser.add_argument('--single_motion_batch_size', type=int, default=256,
                    help='Batch size for single_motion dataset')
-parser.add_argument('--single_motion_max_seq_length', type=int, default=256,
+parser.add_argument('--single_motion_max_seq_length', type=int, default=4096,
                    help='Maximum sequence length for single_motion dataset')
 args = parser.parse_args()
 
 exp_name = "kimi_audio_motion_gpt2_brainco_finetune_beat_single_motion"
-os.makedirs(os.path.join("output/motion_adaptor_v10", exp_name), exist_ok=True)
-os.makedirs(os.path.join("output/motion_adaptor_v10", exp_name, "checkpoints"), exist_ok=True)
+os.makedirs(os.path.join("output_disk0/motion_adaptor_v11", exp_name), exist_ok=True)
+os.makedirs(os.path.join("output_disk0/motion_adaptor_v11", exp_name, "checkpoints"), exist_ok=True)
 
 os.environ["WANDB_MODE"] = "offline"
 
@@ -622,7 +682,7 @@ else:
 # JSONL文件路径
 all_jsonl_files = {
     "BEAT": "/root/workspace/HRI_MLLM/data/BEAT_v2_1110_tokens.jsonl",
-    "single_motion": "/root/workspace/HRI_MLLM/data/single_motion_for_tokenizer_1108_tokens_with_labels.jsonl",
+    "single_motion": "/root/workspace/HRI_MLLM/data/single_motion_for_tokenizer_1108_tokens.train.jsonl",
 }
 
 jsonl_files = list(all_jsonl_files.values())
@@ -696,7 +756,7 @@ else:
 
 # 创建模型
 # 注意：n_positions 需要与 checkpoint 保持一致（4096），否则无法加载权重
-# 训练时使用较短序列（256）不影响模型结构
+# 训练时使用较短序列（如 256/1024）不影响模型结构（n_positions 仍为 4096）
 model_config = GPT2Config(
     vocab_size=config.total_vocab_size,
     n_positions=4096,  # 保持与原 checkpoint 一致
@@ -756,7 +816,7 @@ beat_config = type('Config', (), {
     "audio_vocab_size": config.audio_vocab_size,
     "motion_vocab_size": config.motion_vocab_size,
     "total_vocab_size": config.total_vocab_size,
-    "max_seq_length": 256,  # BEAT裁剪到256
+    "max_seq_length": args.max_seq_length,  # 统一使用运行参数
     "min_seq_length": config.min_seq_length,
     "batch_size": config.batch_size,
     "learning_rate": config.learning_rate,
@@ -769,6 +829,8 @@ beat_config = type('Config', (), {
     "audio_gesture_end_token_id": config.audio_gesture_end_token_id,
     "interleave_ratio": config.interleave_ratio,
     "exp_name": config.exp_name,
+    "concat_samples": False,
+    "target_concat_length": args.max_seq_length,
 })()
 
 single_motion_config = type('Config', (), {
@@ -776,7 +838,7 @@ single_motion_config = type('Config', (), {
     "audio_vocab_size": config.audio_vocab_size,
     "motion_vocab_size": config.motion_vocab_size,
     "total_vocab_size": config.total_vocab_size,
-    "max_seq_length": args.single_motion_max_seq_length,  # single_motion使用256
+    "max_seq_length": args.single_motion_max_seq_length,  # single_motion使用运行参数
     "min_seq_length": config.min_seq_length,
     "batch_size": config.batch_size,
     "learning_rate": config.learning_rate,
@@ -789,6 +851,8 @@ single_motion_config = type('Config', (), {
     "audio_gesture_end_token_id": config.audio_gesture_end_token_id,
     "interleave_ratio": config.interleave_ratio,
     "exp_name": config.exp_name,
+    "concat_samples": True,
+    "target_concat_length": 3000,
 })()
 
 # 创建独立的数据集（beat和single_motion）
@@ -854,17 +918,21 @@ class SubsampledDataset(Dataset):
     def __getitem__(self, idx):
         return self.base_dataset[self.indices[idx]]
 
-# 创建single_motion的子采样数据集（1/3 ≈ 0.333）
-single_motion_subsampled = SubsampledDataset(single_motion_dataset, sample_ratio=1/3)
-
-if local_rank == 0:
-    print(f"\nSingle_motion subsampling: {len(single_motion_dataset)} -> {len(single_motion_subsampled)} samples (1/3)")
+# 创建single_motion的子采样数据集（当未启用加权采样时才启用1/3子采样）
+if args.use_weighted_datasets:
+    single_motion_subsampled = single_motion_dataset
+    if local_rank == 0:
+        print(f"\nWeighted datasets enabled: disable single_motion subsampling. Using full single_motion: {len(single_motion_dataset)} samples")
+else:
+    single_motion_subsampled = SubsampledDataset(single_motion_dataset, sample_ratio=1/3)
+    if local_rank == 0:
+        print(f"\nSingle_motion subsampling: {len(single_motion_dataset)} -> {len(single_motion_subsampled)} samples (1/3)")
 
 # 合并数据集
 combined_dataset = ConcatDataset([beat_dataset, single_motion_subsampled])
 if local_rank == 0:
     print(f"Combined dataset: {len(combined_dataset)} samples (BEAT: {len(beat_dataset)}, single_motion: {len(single_motion_subsampled)})")
-    print(f"All sequences max_length: 256")
+    print(f"All sequences max_length: {beat_config.max_seq_length}")
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
 
@@ -874,21 +942,61 @@ if args.resume_from and os.path.exists(args.resume_from):
         optimizer.load_state_dict(checkpoint['optimizer'])
 
 # 创建DataLoader
-if world_size > 1:
-    sampler = DistributedSampler(
-        combined_dataset,
-        num_replicas=world_size,
+# 若启用数据集加权采样，则用WeightedDatasetSampler替代DistributedSampler，实现每epoch按权重均衡抽样
+if args.use_weighted_datasets:
+    datasets_list = [beat_dataset, single_motion_subsampled]
+    dataset_weights = args.dataset_weights
+    if local_rank == 0:
+        print(f"\nUsing WeightedDatasetSampler with weights: {dataset_weights}")
+    sampler = WeightedDatasetSampler(
+        datasets=datasets_list,
+        dataset_weights=dataset_weights,
+        num_samples=None,  # 默认使用各数据集总样本数之和，再按world_size划分
+        replacement=True,
+        shuffle=True,
         rank=local_rank,
-        shuffle=True
+        world_size=world_size
     )
+    # 统计一次本进程将要抽样的每个数据集样本占比（仅首次估计）
+    if local_rank == 0:
+        try:
+            tmp_indices = list(iter(sampler))
+            # 将global idx映射到dataset idx
+            def find_ds_idx(cum_sizes, gidx):
+                for i in range(len(cum_sizes)-1):
+                    if cum_sizes[i] <= gidx < cum_sizes[i+1]:
+                        return i
+                return len(cum_sizes)-2
+            beat_count = 0
+            single_count = 0
+            for gidx in tmp_indices[: min(10000, len(tmp_indices))]:
+                ds_idx = find_ds_idx(sampler.cumulative_sizes, gidx)
+                if ds_idx == 0:
+                    beat_count += 1
+                else:
+                    single_count += 1
+            total_tmp = beat_count + single_count
+            if total_tmp > 0:
+                print(f"Sampled preview (first {total_tmp}): BEAT {beat_count/total_tmp:.3f}, single_motion {single_count/total_tmp:.3f}")
+        except Exception as _:
+            pass
 else:
-    sampler = None
+    if world_size > 1:
+        sampler = DistributedSampler(
+            combined_dataset,
+            num_replicas=world_size,
+            rank=local_rank,
+            shuffle=True
+        )
+    else:
+        sampler = None
 
 def collate_fn(batch):
     tokens = torch.stack([item['tokens'] for item in batch]).long()
     masks = torch.stack([item['mask'] for item in batch]).long()
     lengths = torch.tensor([item['seq_length'] for item in batch])
-    return {'tokens': tokens, 'mask': masks, 'lengths': lengths}
+    source_ids = torch.tensor([item.get('source_id', 0) for item in batch]).long()
+    return {'tokens': tokens, 'mask': masks, 'lengths': lengths, 'source_ids': source_ids}
 
 dataloader = DataLoader(
     combined_dataset,
@@ -910,7 +1018,7 @@ scheduler = torch.optim.lr_scheduler.OneCycleLR(
     epochs=config.epochs
 )
 
-accum_steps = 1  # 序列长度统一为256，不需要梯度累积
+accum_steps = 1  # 当前不使用梯度累积（可按需要开启）
 
 # 用于跟踪全局step数
 global_step = 0
@@ -919,14 +1027,19 @@ if local_rank == 0:
     print(f"\n🚀 Starting finetuning from epoch {start_epoch} to {config.epochs}")
     print(f"   Total epochs to train: {config.epochs - start_epoch}")
     print(f"   Training strategy: BEAT + single_motion (1/3 subsampled) combined")
-    print(f"   Config: max_seq_length=256, batch_size={config.batch_size}, accum_steps={accum_steps}")
+    print(f"   Config: max_seq_length={beat_config.max_seq_length}, batch_size={config.batch_size}, accum_steps={accum_steps}")
     print(f"   BEAT samples: {len(beat_dataset)}")
     print(f"   single_motion samples per epoch: {len(single_motion_subsampled)} (1/3 of {len(single_motion_dataset)})")
     print(f"{'='*80}\n")
 
 for epoch in range(start_epoch, config.epochs):
-    # 每个epoch重新采样single_motion数据集
-    single_motion_subsampled.set_epoch(epoch)
+    # 每个epoch重新采样single_motion数据集（仅当包装为SubsampledDataset时）
+    if hasattr(single_motion_subsampled, "set_epoch"):
+        single_motion_subsampled.set_epoch(epoch)
+    
+    # 统计本epoch各数据集占batch数的占比（以多数样本来源为该batch归属）
+    batch_majority_counts = {0: 0, 1: 0}  # 0: BEAT, 1: single_motion
+    total_batches_counted = 0
     
     if local_rank == 0:
         print(f"\n📊 Epoch {epoch+1}/{config.epochs}")
@@ -935,6 +1048,9 @@ for epoch in range(start_epoch, config.epochs):
     
     # 设置sampler的epoch（确保每个epoch的shuffle不同）
     if sampler is not None:
+        sampler.set_epoch(epoch)
+    # 若使用WeightedDatasetSampler，同样设置epoch以获得每epoch不同的重采样
+    if args.use_weighted_datasets and sampler is not None and hasattr(sampler, "set_epoch"):
         sampler.set_epoch(epoch)
     
     model.train()
@@ -950,6 +1066,17 @@ for epoch in range(start_epoch, config.epochs):
         inputs = batch['tokens'].to(device, non_blocking=True).long()
         masks = batch['mask'].to(device, non_blocking=True).long()
         lengths = batch['lengths']
+        source_ids = batch.get('source_ids', None)
+        
+        # 统计当前batch的来源多数归属
+        if source_ids is not None:
+            num_beat = (source_ids == 0).sum().item()
+            num_single = (source_ids == 1).sum().item()
+            if num_beat >= num_single:
+                batch_majority_counts[0] += 1
+            else:
+                batch_majority_counts[1] += 1
+            total_batches_counted += 1
         
         attn_mask = (inputs != config.pad_token_id).float().to(device)
         
@@ -1000,6 +1127,17 @@ for epoch in range(start_epoch, config.epochs):
     
     if local_rank == 0:
         avg_loss = total_loss / len(dataloader)
+        # 输出本epoch的batch占比统计
+        if total_batches_counted > 0:
+            beat_ratio = batch_majority_counts[0] / total_batches_counted
+            single_ratio = batch_majority_counts[1] / total_batches_counted
+            print(f"   Batch majority ratio - BEAT: {beat_ratio:.3f}, single_motion: {single_ratio:.3f} "
+                  f"({batch_majority_counts[0]}/{total_batches_counted} vs {batch_majority_counts[1]}/{total_batches_counted})")
+            wandb.log({
+                "epoch/batch_majority_ratio_beat": beat_ratio,
+                "epoch/batch_majority_ratio_single_motion": single_ratio,
+                "epoch/batches_counted": total_batches_counted,
+            })
         wandb.log({
             "epoch/loss": avg_loss,
             "epoch": epoch,
@@ -1008,7 +1146,7 @@ for epoch in range(start_epoch, config.epochs):
         print(f"Epoch {epoch+1}/{config.epochs} | Loss: {avg_loss:.4f} | Steps: {len(dataloader)}")
         
         if (epoch + 1) % 50 == 0:
-            ckpt_path = f"output/motion_adaptor_v10/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
+            ckpt_path = f"output_disk0/motion_adaptor_v11/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
             model_to_save = model.module if world_size > 1 else model
             torch.save({
                 'epoch': epoch,
@@ -1020,7 +1158,7 @@ for epoch in range(start_epoch, config.epochs):
 
 if local_rank == 0:
     model_to_save = model.module if world_size > 1 else model
-    model_to_save.save_pretrained(f"output/motion_adaptor_v10/{config.exp_name}")
+    model_to_save.save_pretrained(f"output_disk0/motion_adaptor_v11/{config.exp_name}")
 
 if world_size > 1:
     dist.destroy_process_group()

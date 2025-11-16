@@ -8,7 +8,7 @@ CHECKPOINT=${1:-"/root/workspace/HRI_MLLM/output_disk0/ddp_kimi_lora_adaptor_bea
 NUM_SAMPLES=${2:-10}
 
 echo "🧪 快速批量测试"
-echo "="*60
+echo "============================================================"
 echo "Checkpoint: $CHECKPOINT"
 echo "测试样本数: $NUM_SAMPLES"
 echo ""
@@ -48,6 +48,17 @@ fi
 SUCCESS_COUNT=0
 FAIL_COUNT=0
 
+# 查找 VQ-VAE checkpoint（可选）
+VQVAE_CKPT=""
+if [ -f "output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt" ]; then
+    VQVAE_CKPT="--vqvae_checkpoint output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt"
+elif [ -f "output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt" ]; then
+    VQVAE_CKPT="--vqvae_checkpoint output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt"
+else
+    echo "⚠️  未找到 VQ-VAE checkpoint，将使用预训练模型"
+fi
+
+# 使用test_trained_model_from_jsonl.py进行批量测试
 for i in $(seq 0 $((NUM_SAMPLES-1))); do
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -56,9 +67,14 @@ for i in $(seq 0 $((NUM_SAMPLES-1))); do
     
     python HRI_mllm/test/test_trained_model_from_jsonl.py \
         --checkpoint "$CHECKPOINT" \
+        --jsonl_path /root/workspace/HRI_MLLM/data/THUMB_FOREFINGER_AND_LITTLE_FINGER_RAISE_1112_tokens.jsonl \
         --sample_idx "$i" \
         --output_dir "test_output/sample_${i}" \
-        2>&1 | grep -E "(✅|❌|📊|🎉|Error)" || true
+        --temperature 1.0 \
+        --top_k 50 \
+        --max_motion_tokens 512 \
+        --vqvae_config g1_vqvae_arbitrary_length_balanced.yaml \
+        $VQVAE_CKPT
     
     if [ $? -eq 0 ]; then
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
@@ -91,45 +107,51 @@ for i in range($NUM_SAMPLES):
 
 if reports:
     print(f"\n📋 测试汇总:")
-    print(f"{'='*80}")
-    print(f"{'样本':^6} | {'Audio Tokens':^15} | {'Motion Tokens':^15} | {'准确率':^12} | {'状态':^8}")
+    print(f"{'='*90}")
+    print(f"{'样本':^6} | {'Kimi准确率':^15} | {'GT Audio准确率':^15} | {'GT Motion':^12} | {'状态':^8}")
     print(f"{'-'*6}-|-{'-'*15}-|-{'-'*15}-|-{'-'*12}-|-{'-'*8}")
     
-    accuracies = []
+    kimi_accuracies = []
+    gt_audio_accuracies = []
+    
     for r in reports:
         idx = r['sample_idx']
-        audio_gen = r['generated']['audio_tokens']
-        motion_gen = r['generated']['motion_tokens']
-        accuracy = r['comparison']['motion_accuracy']
+        motion_gt = r['ground_truth']['motion_tokens']
+        
+        kimi_acc = r['kimi_audio_motion']['motion_accuracy']
+        gt_audio_acc = r['gt_audio_motion']['motion_accuracy']
         
         # 提取数值
-        if accuracy != 'N/A':
-            acc_val = float(accuracy.rstrip('%'))
-            accuracies.append(acc_val)
+        if kimi_acc != 'N/A':
+            kimi_accuracies.append(float(kimi_acc.rstrip('%')))
+        if gt_audio_acc != 'N/A':
+            gt_audio_accuracies.append(float(gt_audio_acc.rstrip('%')))
         
-        status = "✅" if accuracy != 'N/A' else "⚠️"
-        print(f"{idx:^6} | {audio_gen:^15} | {motion_gen:^15} | {accuracy:^12} | {status:^8}")
+        status = "✅"
+        print(f"{idx:^6} | {kimi_acc:^15} | {gt_audio_acc:^15} | {motion_gt:^12} | {status:^8}")
     
-    print(f"{'='*80}")
+    print(f"{'='*90}")
     
-    if accuracies:
+    if kimi_accuracies:
         print(f"\n📈 统计信息:")
-        print(f"   平均准确率: {np.mean(accuracies):.2f}%")
-        print(f"   最高准确率: {np.max(accuracies):.2f}%")
-        print(f"   最低准确率: {np.min(accuracies):.2f}%")
-        print(f"   标准差: {np.std(accuracies):.2f}%")
+        print(f"   [方案A] Kimi audio → motion:")
+        print(f"      平均准确率: {np.mean(kimi_accuracies):.2f}%")
+        print(f"      最高准确率: {np.max(kimi_accuracies):.2f}%")
+        print(f"      最低准确率: {np.min(kimi_accuracies):.2f}%")
+        print(f"      标准差: {np.std(kimi_accuracies):.2f}%")
+    
+    if gt_audio_accuracies:
+        print(f"   [方案B] GT audio → motion:")
+        print(f"      平均准确率: {np.mean(gt_audio_accuracies):.2f}%")
+        print(f"      最高准确率: {np.max(gt_audio_accuracies):.2f}%")
+        print(f"      最低准确率: {np.min(gt_audio_accuracies):.2f}%")
+        print(f"      标准差: {np.std(gt_audio_accuracies):.2f}%")
     
     # 保存汇总
     with open('test_output/summary_report.json', 'w') as f:
         json.dump(reports, f, indent=2, ensure_ascii=False)
     
     print(f"\n✅ 汇总报告已保存: test_output/summary_report.json")
-    
-    # 列出所有视频
-    print(f"\n🎬 生成的视频文件:")
-    for i in range(len(reports)):
-        video_path = f"test_output/sample_{i}/visualization.mp4"
-        print(f"   {video_path}")
 
 else:
     print("❌ 未找到测试报告")
@@ -139,9 +161,17 @@ echo ""
 echo "📁 输出目录: test_output/"
 echo ""
 echo "💡 提示："
-echo "   - 查看视频: vlc test_output/sample_0/visualization.mp4"
-echo "   - 查看报告: cat test_output/summary_report.json"
-echo "   - 听原始问题: aplay test_output/sample_0/user_audio_question.wav"
-echo "   - 听GT回复: aplay test_output/sample_0/gt_audio_response.wav"
+echo "   - 查看汇总报告: cat test_output/summary_report.json"
+echo "   - 查看单个样本报告: cat test_output/sample_0/test_report.json"
+echo ""
+echo "🎬 视频对比："
+echo "   1. GT motion (配GT assistant audio): vlc test_output/sample_0/gt_motion.mp4"
+echo "   2. Kimi audio → motion (配Kimi生成audio): vlc test_output/sample_0/kimi_audio_motion.mp4"
+echo "   3. GT audio → motion (配GT assistant audio): vlc test_output/sample_0/gt_audio_motion.mp4"
+echo ""
+echo "🔊 音频文件："
+echo "   - 用户问题: aplay test_output/sample_0/user_audio.wav"
+echo "   - GT 助手回答: aplay test_output/sample_0/assistant_audio.wav"
+echo "   - Kimi 生成回答: aplay test_output/sample_0/kimi_generated_audio.wav"
 
 

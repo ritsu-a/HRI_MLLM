@@ -17,6 +17,8 @@ torchrun \
   --resume_from /root/workspace/HRI_MLLM/output/motion_adaptor_v10/kimi_audio_motion_gpt2_brainco_synthetic_en/checkpoints/epoch_1350.pt \
   --epochs 3000 \
   --batch_size 64 \
-  --max_seq_length 256 \
-  --single_motion_max_seq_length 256
+  --max_seq_length 4096 \
+  --single_motion_max_seq_length 4096 \
+  --use_weighted_datasets \
+  --dataset_weights 1.0 2.0
 
