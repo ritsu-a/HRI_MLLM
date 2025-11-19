@@ -58,8 +58,12 @@ Create single motion JSONL with label tokens:
         --device cuda \
         --create_jsonl \
         --jsonl_output_dir data \
-        --jsonl_output_name single_motion_for_tokenizer_1108_tokens_with_labels.jsonl \
+        --jsonl_output_name single_motion_for_tokenizer_1118_tokens_with_labels.jsonl \
         --use_json_labels
+
+        # --debug_labels
+
+# note: can only handle SINGLE MOTION in per sequence 
 
 
 Visualize JSONL motion:
@@ -79,17 +83,26 @@ Train Motion Adaptor on BEAT:
 Finetune Motion Adaptor on single motion:
     bash train_beat_single_motion_finetune_8gpu.sh
 
+Finetune with label loss:
+    bash train_beat_single_motion_finetune_8gpu_with_labels.sh
+
 Test Motion Adaptor on BEAT and single motion:
     python HRI_mllm/test/test_adaptor_jsonl_comparison.py \
-    --jsonl_path /root/workspace/HRI_MLLM/data/single_motion_for_tokenizer_1108_tokens_with_labels.jsonl \
-    --motion_adaptor_path /root/workspace/HRI_MLLM/output/motion_adaptor_v10/kimi_audio_motion_gpt2_brainco_finetune_beat_single_motion/checkpoints/epoch_1500.pt \
+    --jsonl_path /root/workspace/HRI_MLLM/data/single_motion_for_tokenizer_1108_tokens_with_labels_train_other.jsonl \
+    --motion_adaptor_path /root/workspace/HRI_MLLM/output_disk0/motion_adaptor_v13/kimi_audio_motion_gpt2_brainco_synthetic_en/checkpoints/epoch_3000.pt \
     --vqvae_config g1_vqvae_arbitrary_length_balanced.yaml \
     --vqvae_checkpoint output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt \
     --output_dir ./adaptor_comparison_results \
     --num_samples 50 \
-    --temperature 1.2 \
-    --top_k 100 \
-    --repetition_penalty 1.5
+    --temperature 1.0 \
+    --top_k 10 \
+    --repetition_penalty 1.0
+
+    # 注意：测试脚本会生成4个对比视频（如果数据包含label_tokens）：
+    # 1. GT - 真实motion
+    # 2. Teacher-Forcing - 使用GT motion tokens的预测
+    # 3. Free-Running - 完全自回归生成
+    # 4. FR-GT-Label - 使用GT label one-hot的free-running生成
 
 
 

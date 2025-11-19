@@ -53,8 +53,9 @@ class JSONLAudioMotionDataset(Dataset):
                     print(f"Error processing line {line_num} in {jsonl_path}: {e}")
                     continue
         
-        # 首次构建样本（不指定epoch）
+        # 首次构建样本（不指定epoch），并记录固定样本数用于后续各epoch保持长度不变
         self._rebuild_samples(epoch=None)
+        self._fixed_num_samples = len(self.samples)
         
         print(f"Loaded {len(self.samples)} samples from {jsonl_path}")
         if self.extract_action_class:
@@ -74,7 +75,9 @@ class JSONLAudioMotionDataset(Dataset):
         
         if not self.concat_samples:
             for sample in self.raw_samples:
-                self._add_sequence(sample['audio_tokens'], sample['motion_tokens'], sample['motion_labels'], sample['action_class'])
+                label_tokens = sample.get('label_tokens', None)
+                self._add_sequence(sample['audio_tokens'], sample['motion_tokens'], sample['motion_labels'], sample['action_class'], label_tokens)
+            # 非拼接模式：首次构建后记录长度；后续epoch不改变长度
             return
         
         # 可重复的随机：若提供了epoch，则用其作为种子扰动
@@ -84,15 +87,18 @@ class JSONLAudioMotionDataset(Dataset):
         shuffled = self.raw_samples[:]
         rng.shuffle(shuffled)
         
-        buffer_audio, buffer_motion, buffer_labels = [], [], []
+        buffer_audio, buffer_motion, buffer_labels, buffer_label_tokens = [], [], [], []
         for sample in shuffled:
             audio_tokens = sample['audio_tokens']
             motion_tokens = sample['motion_tokens']
             motion_labels = sample['motion_labels']
+            label_tokens = sample.get('label_tokens', None)
             
             motion_offset = len(buffer_motion)
             buffer_audio.extend(audio_tokens)
             buffer_motion.extend(motion_tokens)
+            if label_tokens:
+                buffer_label_tokens.extend(label_tokens)
             
             if motion_labels:
                 for label in motion_labels:
@@ -104,11 +110,35 @@ class JSONLAudioMotionDataset(Dataset):
                     buffer_labels.append(new_label)
             
             if len(buffer_audio) + len(buffer_motion) >= self.target_concat_length:
-                self._add_sequence(buffer_audio, buffer_motion, buffer_labels, None)
-                buffer_audio, buffer_motion, buffer_labels = [], [], []
+                self._add_sequence(buffer_audio, buffer_motion, buffer_labels, None, buffer_label_tokens if buffer_label_tokens else None)
+                buffer_audio, buffer_motion, buffer_labels, buffer_label_tokens = [], [], [], []
         
         if buffer_audio and buffer_motion:
-            self._add_sequence(buffer_audio, buffer_motion, buffer_labels, None)
+            self._add_sequence(buffer_audio, buffer_motion, buffer_labels, None, buffer_label_tokens if buffer_label_tokens else None)
+
+        # 方案A：保持数据集长度恒定
+        # 首次构建时尚无固定长度；仅在后续epoch（epoch is not None）时进行对齐
+        if epoch is not None and hasattr(self, "_fixed_num_samples"):
+            cur_len = len(self.samples)
+            target_len = self._fixed_num_samples
+            if cur_len > target_len:
+                # 截断
+                self.samples = self.samples[:target_len]
+                self.action_classes = self.action_classes[:target_len]
+                self.seq_lengths = self.seq_lengths[:target_len]
+            elif cur_len < target_len:
+                # 采样补齐（有放回）
+                deficit = target_len - cur_len
+                if cur_len > 0:
+                    rng = random.Random()
+                    if epoch is not None:
+                        rng.seed(epoch + 4242)
+                    indices = [rng.randrange(cur_len) for _ in range(deficit)]
+                    for idx in indices:
+                        self.samples.append(self.samples[idx])
+                        self.action_classes.append(self.action_classes[idx])
+                        self.seq_lengths.append(self.seq_lengths[idx])
+                # 若cur_len==0（极端情况），则保持空（target也应为0）
 
     def set_epoch(self, epoch: int):
         """当启用拼接时，每个epoch重建一次拼接顺序以制造新样本排列"""
@@ -120,6 +150,7 @@ class JSONLAudioMotionDataset(Dataset):
         audio_tokens = None
         motion_tokens = None
         motion_labels = data.get('motion_labels')
+        label_tokens = None  # 从conversation中读取
         action_class = None
         
         for msg in data.get('conversation', []):
@@ -135,6 +166,9 @@ class JSONLAudioMotionDataset(Dataset):
                                 action_class = f"{parts[0]}_{parts[1]}"
             elif msg.get('message_type') == 'audio_motion' and 'motion_tokens' in msg:
                 motion_tokens = msg['motion_tokens']
+                # label_tokens在audio_motion消息中
+                if 'label_tokens' in msg:
+                    label_tokens = msg['label_tokens']
         
         if audio_tokens is None or motion_tokens is None:
             return None
@@ -142,10 +176,27 @@ class JSONLAudioMotionDataset(Dataset):
         audio_tokens = self._ensure_list(audio_tokens)
         motion_tokens = self._ensure_list(motion_tokens)
         
+        # 处理label_tokens，确保与motion_tokens长度一致
+        # 注意：0是有效的类别标签，所以BEAT数据（没有label）使用-1作为占位符
+        if label_tokens is not None:
+            label_tokens = self._ensure_list(label_tokens)
+            # 确保label_tokens与motion_tokens长度一致
+            if len(label_tokens) != len(motion_tokens):
+                if len(label_tokens) < len(motion_tokens):
+                    # 如果label_tokens较短，用-1填充（表示无效/无label）
+                    label_tokens.extend([-1] * (len(motion_tokens) - len(label_tokens)))
+                else:
+                    # 如果label_tokens较长，截断
+                    label_tokens = label_tokens[:len(motion_tokens)]
+        else:
+            # 如果没有label_tokens（BEAT数据），创建全-1列表（-1表示无效/无label）
+            label_tokens = [-1] * len(motion_tokens)
+        
         return {
             'audio_tokens': audio_tokens,
             'motion_tokens': motion_tokens,
             'motion_labels': motion_labels,
+            'label_tokens': label_tokens,  # 添加label_tokens
             'action_class': action_class,
         }
 
@@ -156,9 +207,20 @@ class JSONLAudioMotionDataset(Dataset):
             return tokens.tolist()
         return list(tokens)
 
-    def _add_sequence(self, audio_tokens, motion_tokens, motion_labels, action_class):
+    def _add_sequence(self, audio_tokens, motion_tokens, motion_labels, action_class, label_tokens=None):
         if not audio_tokens or not motion_tokens:
             return
+        
+        # 处理label_tokens，确保与motion_tokens长度一致
+        # 注意：0是有效的类别标签，所以BEAT数据（没有label）使用-1作为占位符
+        if label_tokens is None:
+            label_tokens = [-1] * len(motion_tokens)  # -1表示无效/无label
+        else:
+            if len(label_tokens) != len(motion_tokens):
+                if len(label_tokens) < len(motion_tokens):
+                    label_tokens.extend([-1] * (len(motion_tokens) - len(label_tokens)))  # 用-1填充
+                else:
+                    label_tokens = label_tokens[:len(motion_tokens)]
         
         gesture_start_indices = set()
         gesture_end_indices = set()
@@ -170,11 +232,13 @@ class JSONLAudioMotionDataset(Dataset):
                     gesture_end_indices.add(label['end_token_index'])
         
         full_sequence = []
+        full_label_sequence = []  # 存储label_tokens，与full_sequence对应
         token_types = []
         motion_token_idx = 0
         
         for i in range(len(audio_tokens)):
             full_sequence.append(int(audio_tokens[i]))
+            full_label_sequence.append(-1)  # audio位置label为-1（无效）
             token_types.append(0)
             
             if (i + 1) % self.interleave_audios == 0:
@@ -183,17 +247,22 @@ class JSONLAudioMotionDataset(Dataset):
                     if motion_token_idx < len(motion_tokens):
                         if motion_token_idx in gesture_start_indices:
                             full_sequence.append(self.config.gesture_start_token_id)
+                            full_label_sequence.append(-1)  # 特殊token位置label为-1（无效）
                             token_types.append(1)
                             full_sequence.append(self.config.audio_gesture_start_token_id)
+                            full_label_sequence.append(-1)  # audio特殊token位置label为-1
                             token_types.append(0)
                         
                         full_sequence.append(int(motion_tokens[motion_token_idx]))
+                        full_label_sequence.append(int(label_tokens[motion_token_idx]))  # 对应motion token的label（0-8或-1）
                         token_types.append(1)
                         
                         if motion_token_idx in gesture_end_indices:
                             full_sequence.append(self.config.gesture_end_token_id)
+                            full_label_sequence.append(-1)  # 特殊token位置label为-1（无效）
                             token_types.append(1)
                             full_sequence.append(self.config.audio_gesture_end_token_id)
+                            full_label_sequence.append(-1)  # audio特殊token位置label为-1
                             token_types.append(0)
                         
                         motion_token_idx += 1
@@ -201,32 +270,39 @@ class JSONLAudioMotionDataset(Dataset):
         while motion_token_idx < len(motion_tokens):
             if motion_token_idx in gesture_start_indices:
                 full_sequence.append(self.config.gesture_start_token_id)
+                full_label_sequence.append(-1)  # 特殊token位置label为-1
                 token_types.append(1)
                 full_sequence.append(self.config.audio_gesture_start_token_id)
+                full_label_sequence.append(-1)  # audio特殊token位置label为-1
                 token_types.append(0)
             
             full_sequence.append(int(motion_tokens[motion_token_idx]))
+            full_label_sequence.append(int(label_tokens[motion_token_idx]))  # 对应motion token的label
             token_types.append(1)
             
             if motion_token_idx in gesture_end_indices:
                 full_sequence.append(self.config.gesture_end_token_id)
+                full_label_sequence.append(-1)  # 特殊token位置label为-1
                 token_types.append(1)
                 full_sequence.append(self.config.audio_gesture_end_token_id)
+                full_label_sequence.append(-1)  # audio特殊token位置label为-1
                 token_types.append(0)
             
             motion_token_idx += 1
         
-        self.apply_sliding_window(full_sequence, token_types, action_class)
+        self.apply_sliding_window(full_sequence, full_label_sequence, token_types, action_class)
         self.stats['total_sequences'] += 1
     
-    def apply_sliding_window(self, full_seq, token_types, action_class=None):
+    def apply_sliding_window(self, full_seq, full_label_seq, token_types, action_class=None):
         """（已移除滑窗）仅生成单一样本：将序列截断到 max_seq_length"""
         max_len = self.config.max_seq_length
         sub_seq = full_seq[:max_len]
+        sub_label_seq = full_label_seq[:max_len]
         sub_types = token_types[:max_len]
         mask = [1 if t == 1 else 0 for t in sub_types]
         
         padded_seq = sub_seq + [self.SEQ_PAD_TOKEN] * (max_len - len(sub_seq))
+        padded_label_seq = sub_label_seq + [-1] * (max_len - len(sub_label_seq))  # label padding为-1（0是有效类别）
         padded_mask = mask + [0] * (max_len - len(mask))
         
         sample_idx = len(self.samples)
@@ -234,6 +310,7 @@ class JSONLAudioMotionDataset(Dataset):
         self.samples.append({
             'tokens': torch.tensor(padded_seq),
             'mask': torch.tensor(padded_mask),
+            'label_tokens': torch.tensor(padded_label_seq),  # 添加label_tokens
             'seq_length': seq_length,
             'source_id': self.source_id
         })
@@ -656,11 +733,18 @@ parser.add_argument('--single_motion_batch_size', type=int, default=256,
                    help='Batch size for single_motion dataset')
 parser.add_argument('--single_motion_max_seq_length', type=int, default=4096,
                    help='Maximum sequence length for single_motion dataset')
+parser.add_argument('--single_motion_jsonl', type=str, default=None,
+                   help='Path to single_motion JSONL file (overrides default path)')
+parser.add_argument('--version', type=str, default='v11',
+                   help='Version number for output directory (e.g., v11, v12)')
+parser.add_argument('--debug_label_loss', action='store_true',
+                   help='Enable debug output for label_loss calculation (prints detailed info at step 0)')
 args = parser.parse_args()
 
 exp_name = "kimi_audio_motion_gpt2_brainco_finetune_beat_single_motion"
-os.makedirs(os.path.join("output_disk0/motion_adaptor_v11", exp_name), exist_ok=True)
-os.makedirs(os.path.join("output_disk0/motion_adaptor_v11", exp_name, "checkpoints"), exist_ok=True)
+version_dir = f"output_disk0/motion_adaptor_{args.version}"
+os.makedirs(os.path.join(version_dir, exp_name), exist_ok=True)
+os.makedirs(os.path.join(version_dir, exp_name, "checkpoints"), exist_ok=True)
 
 os.environ["WANDB_MODE"] = "offline"
 
@@ -680,9 +764,12 @@ else:
     torch.cuda.set_device(0)
 
 # JSONL文件路径
+default_single_motion_path = "/root/workspace/HRI_MLLM/data/single_motion_for_tokenizer_1108_tokens.train.jsonl"
+single_motion_path = args.single_motion_jsonl if args.single_motion_jsonl else default_single_motion_path
+
 all_jsonl_files = {
     "BEAT": "/root/workspace/HRI_MLLM/data/BEAT_v2_1110_tokens.jsonl",
-    "single_motion": "/root/workspace/HRI_MLLM/data/single_motion_for_tokenizer_1108_tokens.train.jsonl",
+    "single_motion": single_motion_path,
 }
 
 jsonl_files = list(all_jsonl_files.values())
@@ -786,12 +873,34 @@ if args.resume_from and os.path.exists(args.resume_from):
         print(f"{'='*80}")
     
     checkpoint = torch.load(args.resume_from, map_location='cpu', weights_only=True)
-    model.load_state_dict(checkpoint['model_state'])
+    
+    # 使用strict=False以允许缺失新添加的层（如label_classifier和label_logit_to_embedding）
+    checkpoint_state = checkpoint['model_state']
+    model_state = model.state_dict()
+    
+    # 检查缺失的键
+    missing_keys = set(model_state.keys()) - set(checkpoint_state.keys())
+    unexpected_keys = set(checkpoint_state.keys()) - set(model_state.keys())
+    
+    if local_rank == 0:
+        if missing_keys:
+            print(f"⚠️  Missing keys in checkpoint (will use default initialization):")
+            for key in sorted(missing_keys):
+                print(f"   - {key}")
+        if unexpected_keys:
+            print(f"⚠️  Unexpected keys in checkpoint (will be ignored):")
+            for key in sorted(unexpected_keys):
+                print(f"   - {key}")
+    
+    # 加载checkpoint，strict=False允许缺失的键
+    model.load_state_dict(checkpoint_state, strict=False)
     start_epoch = checkpoint.get('epoch', 0) + 1
     
     if local_rank == 0:
         print(f"✅ Loaded checkpoint from epoch {checkpoint.get('epoch', 0)}")
         print(f"   Resuming from epoch {start_epoch}")
+        if missing_keys:
+            print(f"   Note: New layers initialized with default values")
         print(f"{'='*80}\n")
 else:
     if local_rank == 0:
@@ -939,7 +1048,16 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
 if args.resume_from and os.path.exists(args.resume_from):
     checkpoint = torch.load(args.resume_from, map_location='cpu')
     if 'optimizer' in checkpoint:
-        optimizer.load_state_dict(checkpoint['optimizer'])
+        try:
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            if local_rank == 0:
+                print(f"✅ Loaded optimizer state from checkpoint")
+        except (ValueError, KeyError) as e:
+            # 如果optimizer state不匹配（例如因为模型结构变化），跳过加载
+            if local_rank == 0:
+                print(f"⚠️  Cannot load optimizer state (model structure changed): {e}")
+                print(f"   Optimizer will be initialized with default state")
+                print(f"   This is normal when adding new layers to the model")
 
 # 创建DataLoader
 # 若启用数据集加权采样，则用WeightedDatasetSampler替代DistributedSampler，实现每epoch按权重均衡抽样
@@ -996,7 +1114,9 @@ def collate_fn(batch):
     masks = torch.stack([item['mask'] for item in batch]).long()
     lengths = torch.tensor([item['seq_length'] for item in batch])
     source_ids = torch.tensor([item.get('source_id', 0) for item in batch]).long()
-    return {'tokens': tokens, 'mask': masks, 'lengths': lengths, 'source_ids': source_ids}
+    # 使用-1作为默认值（0是有效的类别标签）
+    label_tokens = torch.stack([item.get('label_tokens', torch.full_like(item['tokens'], -1)) for item in batch]).long()
+    return {'tokens': tokens, 'mask': masks, 'lengths': lengths, 'source_ids': source_ids, 'label_tokens': label_tokens}
 
 dataloader = DataLoader(
     combined_dataset,
@@ -1055,6 +1175,10 @@ for epoch in range(start_epoch, config.epochs):
     
     model.train()
     total_loss = 0
+    total_motion_loss = 0
+    total_label_loss = 0
+    total_label_correct = 0
+    total_label_count = 0
     optimizer.zero_grad()
     
     if local_rank == 0:
@@ -1083,8 +1207,196 @@ for epoch in range(start_epoch, config.epochs):
         labels = inputs.clone().long()
         labels[masks == 0] = -100
         
-        outputs = model(inputs, labels=labels, attention_mask=attn_mask)
-        loss = outputs.loss / accum_steps
+        label_tokens_batch = batch.get('label_tokens', None)
+        if label_tokens_batch is not None:
+            label_tokens_batch = label_tokens_batch.to(device, non_blocking=True).long()
+        
+        # 启用模型调试（如果指定了debug_label_loss参数，且在第一个step）
+        # 单卡训练时local_rank总是0，多卡训练时只在rank 0打印
+        # 注意：DDP包装后需要访问model.module来设置属性
+        actual_model = model.module if world_size > 1 else model
+        if args.debug_label_loss:
+            if (local_rank == 0 and step == 0) or (world_size == 1 and step == 0):
+                actual_model._debug_label_loss = True
+                if local_rank == 0:
+                    print(f"\n{'='*80}")
+                    print(f"🔍 DEBUG模式已启用 - Step {step} (world_size={world_size})")
+                    print(f"{'='*80}\n")
+            else:
+                actual_model._debug_label_loss = False
+        else:
+            actual_model._debug_label_loss = False
+        
+        outputs = model(inputs, labels=labels, attention_mask=attn_mask, label_tokens=label_tokens_batch)
+        motion_loss = outputs.loss / accum_steps if outputs.loss is not None else 0.0
+        
+        # 多卡训练时，DDP可能不会传递自定义属性，需要从内部模型获取
+        if world_size > 1:
+            # DDP包装后，需要从model.module获取原始输出
+            # 但forward已经返回了outputs，所以我们需要检查outputs是否有自定义属性
+            # 如果没有，说明DDP丢失了自定义属性，需要重新获取
+            if not hasattr(outputs, 'label_loss') or outputs.label_loss is None:
+                # 尝试从内部模型获取（如果forward时保存了）
+                # 注意：这需要在forward中保存label_loss到模型的某个属性
+                if hasattr(model, 'module') and hasattr(model.module, '_last_label_loss'):
+                    outputs.label_loss = model.module._last_label_loss
+                    outputs.label_logits = model.module._last_label_logits
+                elif hasattr(model, '_last_label_loss'):
+                    outputs.label_loss = model._last_label_loss
+                    outputs.label_logits = model._last_label_logits
+        
+        # 调试：检查outputs的所有属性（多卡训练时DDP可能影响自定义属性）
+        if step == 0 and args.debug_label_loss:
+            # 在所有GPU上打印，以便对比
+            print(f"\n[Training DEBUG - Rank {local_rank}] 检查outputs属性:")
+            print(f"   outputs类型: {type(outputs)}")
+            print(f"   hasattr(outputs, 'label_loss'): {hasattr(outputs, 'label_loss')}")
+            print(f"   hasattr(outputs, 'label_logits'): {hasattr(outputs, 'label_logits')}")
+            if hasattr(outputs, 'label_loss'):
+                print(f"   outputs.label_loss: {outputs.label_loss}")
+                print(f"   outputs.label_loss类型: {type(outputs.label_loss)}")
+                if isinstance(outputs.label_loss, torch.Tensor):
+                    print(f"   outputs.label_loss.item(): {outputs.label_loss.item()}")
+            else:
+                print(f"   ❌ outputs没有label_loss属性！")
+                # 尝试从模型获取
+                if world_size > 1 and hasattr(model, 'module'):
+                    if hasattr(model.module, '_last_label_loss'):
+                        print(f"   尝试从model.module._last_label_loss获取: {model.module._last_label_loss}")
+                elif hasattr(model, '_last_label_loss'):
+                    print(f"   尝试从model._last_label_loss获取: {model._last_label_loss}")
+            # 检查是否是DDP包装的问题
+            if world_size > 1:
+                print(f"   ⚠️  多卡训练模式 (world_size={world_size}, local_rank={local_rank})")
+                # 检查当前GPU上的batch数据
+                if source_ids is not None:
+                    num_beat = (source_ids == 0).sum().item()
+                    num_single = (source_ids == 1).sum().item()
+                    print(f"   Rank {local_rank} batch: BEAT={num_beat}, single_motion={num_single}")
+                    if num_single == 0:
+                        print(f"   ⚠️  Rank {local_rank}的batch全是BEAT数据，label_loss应该是0（正常）")
+        
+        # 检查batch中是否有single_motion数据（source_id == 1）
+        # 只有single_motion数据集包含label_tokens，BEAT数据集的label_tokens全为0
+        has_single_motion = source_ids is not None and (source_ids == 1).any()
+        
+        # 获取label_loss（模型已经计算好了，包括对BEAT数据的处理）
+        # 注意：模型会计算所有motion token的label_loss，但CrossEntropyLoss的ignore_index=-1会自动忽略BEAT数据（label=-1）
+        # 在多卡训练时，DDP可能不会自动传递自定义属性，需要手动处理
+        if hasattr(outputs, 'label_loss'):
+            if outputs.label_loss is not None and isinstance(outputs.label_loss, torch.Tensor):
+                label_loss = outputs.label_loss / accum_steps
+            else:
+                label_loss = torch.tensor(0.0, device=device)
+        else:
+            label_loss = torch.tensor(0.0, device=device)
+        
+        # 多卡训练时，如果label_loss是tensor，需要确保在所有GPU上同步
+        # 注意：如果某个GPU的batch全是BEAT数据（没有有效label），该GPU的label_loss可能是0
+        # 但这是正常的，因为CrossEntropyLoss会自动忽略无效label
+        if world_size > 1 and isinstance(label_loss, torch.Tensor) and label_loss.requires_grad:
+            # 确保label_loss在所有GPU上同步（如果需要）
+            # 注意：这里不进行all_reduce，因为每个GPU的batch不同，label_loss应该独立计算
+            pass
+        
+        # 调试：打印label_loss的详细信息
+        if local_rank == 0 and step == 0:
+            print(f"🔍 Label Loss Debug (world_size={world_size}):")
+            print(f"   has_single_motion: {has_single_motion}")
+            print(f"   outputs.label_loss exists: {hasattr(outputs, 'label_loss')}")
+            if hasattr(outputs, 'label_loss'):
+                print(f"   outputs.label_loss value: {outputs.label_loss}")
+                print(f"   outputs.label_loss type: {type(outputs.label_loss)}")
+                if isinstance(outputs.label_loss, torch.Tensor):
+                    print(f"   outputs.label_loss.item(): {outputs.label_loss.item()}")
+                    print(f"   outputs.label_loss.requires_grad: {outputs.label_loss.requires_grad}")
+                    print(f"   outputs.label_loss.device: {outputs.label_loss.device}")
+            print(f"   Final label_loss: {label_loss}")
+            if isinstance(label_loss, torch.Tensor):
+                print(f"   label_loss.item(): {label_loss.item()}")
+            if label_tokens_batch is not None:
+                print(f"   label_tokens_batch shape: {label_tokens_batch.shape}")
+                print(f"   label_tokens_batch valid count (>=0): {(label_tokens_batch >= 0).sum().item()}/{label_tokens_batch.numel()}")
+                # 检查motion位置的label
+                motion_mask_debug = ~((labels == -100) & (attn_mask == 1)) & (attn_mask == 1)
+                if motion_mask_debug.any():
+                    motion_labels_debug = label_tokens_batch[motion_mask_debug]
+                    motion_valid_count = (motion_labels_debug >= 0).sum().item()  # >=0表示有效label
+                    motion_total_count = motion_labels_debug.numel()
+                    print(f"   Motion token positions with valid labels (>=0): {motion_valid_count}/{motion_total_count}")
+                    if motion_valid_count > 0:
+                        unique_labels = torch.unique(motion_labels_debug[motion_labels_debug >= 0])
+                        print(f"   Unique label values in motion positions: {unique_labels.tolist()}")
+                    # 额外调试：检查motion_mask和label_tokens的对应关系
+                    print(f"   Motion mask count: {motion_mask_debug.sum().item()}")
+                    print(f"   Label tokens at motion positions - min: {motion_labels_debug.min().item()}, max: {motion_labels_debug.max().item()}")
+                    print(f"   Label tokens at motion positions - unique values: {torch.unique(motion_labels_debug).tolist()[:10]}")  # 只显示前10个
+        
+        # 调试信息：检查label_tokens是否有有效值（区分BEAT和single_motion）
+        if local_rank == 0 and step == 0 and label_tokens_batch is not None:
+            motion_mask_debug = ~((labels == -100) & (attn_mask == 1)) & (attn_mask == 1)
+            if motion_mask_debug.any():
+                motion_label_tokens_debug = label_tokens_batch[motion_mask_debug]
+                valid_labels_count = (motion_label_tokens_debug >= 0).sum().item()  # >=0表示有效label（0-8是类别，-1是无效）
+                total_motion_count = motion_label_tokens_debug.numel()
+                
+                # 分别统计BEAT和single_motion的label情况
+                if source_ids is not None:
+                    beat_mask = source_ids == 0
+                    single_mask = source_ids == 1
+                    beat_count = beat_mask.sum().item()
+                    single_count = single_mask.sum().item()
+                    print(f"🔍 Debug: Batch composition - BEAT: {beat_count}, single_motion: {single_count}")
+                    
+                    if single_count > 0:
+                        # 只检查single_motion样本的label（确保设备一致）
+                        single_batch_mask = single_mask.unsqueeze(1).expand(-1, motion_mask_debug.shape[1]).to(device)
+                        single_motion_mask = motion_mask_debug & single_batch_mask
+                        if single_motion_mask.any():
+                            single_label_tokens = label_tokens_batch[single_motion_mask]
+                            single_valid_count = (single_label_tokens >= 0).sum().item()  # >=0表示有效label
+                            single_total_count = single_label_tokens.numel()
+                            print(f"   single_motion: {single_valid_count}/{single_total_count} valid labels (>=0)")
+                            if single_valid_count > 0:
+                                unique_labels = torch.unique(single_label_tokens[single_label_tokens >= 0])
+                                print(f"   Unique label values in single_motion: {unique_labels.tolist()}")
+                
+                print(f"   Overall: {valid_labels_count}/{total_motion_count} valid labels (>=0)")
+                if valid_labels_count == 0:
+                    print(f"   ⚠️  Note: BEAT dataset has no labels (label=-1, expected), single_motion should have labels (0-8)")
+        
+        # 计算label分类准确率（只统计single_motion数据）
+        label_accuracy = 0.0
+        if hasattr(outputs, 'label_logits') and outputs.label_logits is not None and label_tokens_batch is not None and has_single_motion:
+            # 找到motion token的位置
+            audio_mask = (labels == -100) & (attn_mask == 1)
+            motion_mask = ~audio_mask & (attn_mask == 1)
+            
+            if motion_mask.any():
+                # 只统计single_motion样本（source_id == 1）
+                if source_ids is not None:
+                    single_batch_mask = (source_ids == 1).unsqueeze(1).expand(-1, motion_mask.shape[1]).to(device)
+                    single_motion_mask = motion_mask & single_batch_mask
+                else:
+                    single_motion_mask = motion_mask
+                
+                if single_motion_mask.any():
+                    # 获取single_motion位置的预测和真实标签
+                    motion_label_logits = outputs.label_logits[single_motion_mask]  # [num_single_motion_tokens, 9]
+                    motion_label_preds = torch.argmax(motion_label_logits, dim=-1)  # [num_single_motion_tokens]
+                    motion_label_tokens = label_tokens_batch[single_motion_mask]  # [num_single_motion_tokens]
+                    
+                    # 忽略label=-1的位置（padding或BEAT数据，没有label）
+                    # 0-8是有效的类别标签
+                    valid_mask = motion_label_tokens >= 0
+                    if valid_mask.any():
+                        correct = (motion_label_preds[valid_mask] == motion_label_tokens[valid_mask]).sum().item()
+                        total = valid_mask.sum().item()
+                        label_accuracy = correct / total if total > 0 else 0.0
+        
+        # 合并loss（可以调整权重）
+        label_loss_weight = 0.5  # 分类loss的权重
+        loss = motion_loss + label_loss_weight * label_loss
         
         loss.backward()
         
@@ -1097,9 +1409,37 @@ for epoch in range(start_epoch, config.epochs):
             global_step += 1
         
         total_loss += loss.item() * accum_steps
+        total_motion_loss += motion_loss.item() * accum_steps
+        # 只有当label_loss是有效的tensor且不为0时才累积
+        if isinstance(label_loss, torch.Tensor) and label_loss.item() != 0.0:
+            total_label_loss += label_loss.item() * accum_steps
+        
+        # 累积准确率统计（只统计single_motion数据）
+        if hasattr(outputs, 'label_logits') and outputs.label_logits is not None and label_tokens_batch is not None and has_single_motion:
+            audio_mask = (labels == -100) & (attn_mask == 1)
+            motion_mask = ~audio_mask & (attn_mask == 1)
+            if motion_mask.any():
+                # 只统计single_motion样本（source_id == 1）
+                if source_ids is not None:
+                    single_batch_mask = (source_ids == 1).unsqueeze(1).expand(-1, motion_mask.shape[1]).to(device)
+                    single_motion_mask = motion_mask & single_batch_mask
+                else:
+                    single_motion_mask = motion_mask
+                
+                if single_motion_mask.any():
+                    motion_label_logits = outputs.label_logits[single_motion_mask]
+                    motion_label_preds = torch.argmax(motion_label_logits, dim=-1)
+                    motion_label_tokens = label_tokens_batch[single_motion_mask]
+                    # 只统计有效的label（>=0，-1表示无效/无label）
+                    valid_mask = motion_label_tokens >= 0
+                    if valid_mask.any():
+                        total_label_correct += (motion_label_preds[valid_mask] == motion_label_tokens[valid_mask]).sum().item()
+                        total_label_count += valid_mask.sum().item()
         
         if local_rank == 0 and step == 0:
-            print(f"📊 Epoch {epoch+1}, Step {step+1}: Loss = {loss.item() * accum_steps:.4f}")
+            print(f"📊 Epoch {epoch+1}, Step {step+1}: Total Loss = {loss.item() * accum_steps:.4f}")
+            print(f"   Motion Loss = {motion_loss.item() * accum_steps:.4f}, Label Loss = {label_loss.item() * accum_steps if label_loss != 0.0 else 0.0:.4f}")
+            print(f"   Label Accuracy = {label_accuracy * 100:.2f}%")
             print(f"   Input shape: {inputs.shape}, Labels shape: {labels.shape}")
             print(f"   Attention mask shape: {attn_mask.shape}")
             print(f"   Motion mask shape: {masks.shape}")
@@ -1107,9 +1447,12 @@ for epoch in range(start_epoch, config.epochs):
             print(f"   Average sequence length: {lengths.float().mean().item():.2f}")
             print(f"   Min/Max sequence length: {lengths.min().item()}/{lengths.max().item()}")
         
-        if local_rank == 0 and (step % 500 == 0 or step == len(dataloader) - 1):
+        if local_rank == 0 and (step % 100 == 0 or step == len(dataloader) - 1):  # 改为每100步记录一次，更频繁
             log_data = {
                 "train/loss": loss.item() * accum_steps,
+                "train/motion_loss": motion_loss.item() * accum_steps,
+                "train/label_loss": label_loss.item() * accum_steps if label_loss != 0.0 and isinstance(label_loss, torch.Tensor) else 0.0,
+                "train/label_accuracy": label_accuracy * 100,  # 转换为百分比
                 "train/lr": scheduler.get_last_lr()[0],
                 "train/seq_length": lengths.float().mean().item(),
                 "train/seq_length_min": lengths.min().item(),
@@ -1120,13 +1463,21 @@ for epoch in range(start_epoch, config.epochs):
                 "train/memory_reserved": torch.cuda.memory_reserved(device) / 1024**3,
             }
             wandb.log(log_data)
-            dataloader_iter.set_postfix(loss=loss.item() * accum_steps)
+            dataloader_iter.set_postfix(
+                loss=loss.item() * accum_steps, 
+                motion_loss=motion_loss.item() * accum_steps, 
+                label_loss=label_loss.item() * accum_steps if label_loss != 0.0 and isinstance(label_loss, torch.Tensor) else 0.0,
+                label_acc=f"{label_accuracy * 100:.2f}%"
+            )
 
     if world_size > 1:
         dist.barrier()
     
     if local_rank == 0:
         avg_loss = total_loss / len(dataloader)
+        avg_motion_loss = total_motion_loss / len(dataloader)
+        avg_label_loss = total_label_loss / len(dataloader) if total_label_loss > 0 else 0.0
+        avg_label_accuracy = (total_label_correct / total_label_count * 100) if total_label_count > 0 else 0.0
         # 输出本epoch的batch占比统计
         if total_batches_counted > 0:
             beat_ratio = batch_majority_counts[0] / total_batches_counted
@@ -1140,13 +1491,16 @@ for epoch in range(start_epoch, config.epochs):
             })
         wandb.log({
             "epoch/loss": avg_loss,
+            "epoch/motion_loss": avg_motion_loss,
+            "epoch/label_loss": avg_label_loss,
+            "epoch/label_accuracy": avg_label_accuracy,
             "epoch": epoch,
             "epoch/step": global_step,
         })
-        print(f"Epoch {epoch+1}/{config.epochs} | Loss: {avg_loss:.4f} | Steps: {len(dataloader)}")
+        print(f"Epoch {epoch+1}/{config.epochs} | Total Loss: {avg_loss:.4f} | Motion Loss: {avg_motion_loss:.4f} | Label Loss: {avg_label_loss:.4f} | Label Accuracy: {avg_label_accuracy:.2f}% | Steps: {len(dataloader)}")
         
         if (epoch + 1) % 50 == 0:
-            ckpt_path = f"output_disk0/motion_adaptor_v11/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
+            ckpt_path = f"{version_dir}/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
             model_to_save = model.module if world_size > 1 else model
             torch.save({
                 'epoch': epoch,
@@ -1158,7 +1512,7 @@ for epoch in range(start_epoch, config.epochs):
 
 if local_rank == 0:
     model_to_save = model.module if world_size > 1 else model
-    model_to_save.save_pretrained(f"output_disk0/motion_adaptor_v11/{config.exp_name}")
+    model_to_save.save_pretrained(f"{version_dir}/{config.exp_name}")
 
 if world_size > 1:
     dist.destroy_process_group()

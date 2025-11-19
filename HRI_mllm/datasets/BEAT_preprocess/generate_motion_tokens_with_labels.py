@@ -228,6 +228,28 @@ def find_csv_file(base_name, data_dir, dataset_name, csv_dir=None):
     return None
 
 
+def find_jsonl_file(base_name, data_dir, dataset_name, jsonl_dir=None):
+    """查找JSONL文件（如果存在）"""
+    if jsonl_dir:
+        jsonl_path = os.path.join(jsonl_dir, base_name + '.jsonl')
+        if os.path.exists(jsonl_path):
+            return jsonl_path
+    
+    # 尝试在数据目录中查找
+    potential_jsonl_paths = [
+        os.path.join(data_dir, "jsonl", base_name + '.jsonl'),
+        os.path.join(data_dir, "labels", base_name + '.jsonl'),
+        os.path.join(data_dir, "annotations", base_name + '.jsonl'),
+        os.path.join(data_dir, base_name + '.jsonl'),
+    ]
+    
+    for path in potential_jsonl_paths:
+        if os.path.exists(path):
+            return path
+    
+    return None
+
+
 def load_motion_labels_from_json(json_path, motion_tokens_count, total_duration):
     """
     从JSON文件加载motion标签信息
@@ -294,6 +316,12 @@ def load_motion_labels_from_csv(csv_path, motion_tokens_count, total_duration):
     Returns:
         labels: List[Dict]，每个Dict包含motion名称和时间范围信息
         total_duration: 总时长（秒）
+    
+    Note:
+        CSV文件需要包含以下列：
+        - actual_start_time: 实际开始时间（秒）
+        - actual_end_time: 实际结束时间（秒）
+        - motion/gesture/label: motion名称
     """
     if csv_path is None or not os.path.exists(csv_path):
         return [], total_duration
@@ -302,9 +330,9 @@ def load_motion_labels_from_csv(csv_path, motion_tokens_count, total_duration):
         # 读取CSV文件
         df = pd.read_csv(csv_path)
         
-        # 检查是否有motion_start和motion_end列
-        if 'motion_start' not in df.columns or 'motion_end' not in df.columns:
-            print(f"Warning: CSV file {csv_path} does not have motion_start and motion_end columns")
+        # 检查是否有actual_start_time和actual_end_time列
+        if 'actual_start_time' not in df.columns or 'actual_end_time' not in df.columns:
+            print(f"Warning: CSV file {csv_path} does not have actual_start_time and actual_end_time columns")
             return [], total_duration
         
         # 检查是否有motion或gesture列
@@ -321,17 +349,24 @@ def load_motion_labels_from_csv(csv_path, motion_tokens_count, total_duration):
         labels = []
         for _, row in df.iterrows():
             motion_name = str(row[motion_col])
-            motion_start = float(row['motion_start'])
-            motion_end = float(row['motion_end'])
+            actual_start_time = row.get('actual_start_time', None)
+            actual_end_time = row.get('actual_end_time', None)
             
-            if motion_name and not pd.isna(motion_start) and not pd.isna(motion_end):
+            # 如果actual_start_time或actual_end_time为空，跳过
+            if pd.isna(actual_start_time) or pd.isna(actual_end_time):
+                continue
+            
+            actual_start_time = float(actual_start_time)
+            actual_end_time = float(actual_end_time)
+            
+            if motion_name and actual_start_time is not None and actual_end_time is not None:
                 labels.append({
                     'motion': motion_name,
-                    'start_time': motion_start,
-                    'end_time': motion_end,
+                    'start_time': actual_start_time,
+                    'end_time': actual_end_time,
                 })
         
-        # 如果没有提供total_duration，尝试从CSV中推断（取最大的motion_end）
+        # 如果没有提供total_duration，尝试从CSV中推断（取最大的actual_end_time）
         if total_duration is None and len(labels) > 0:
             max_end_time = max(label['end_time'] for label in labels)
             total_duration = max_end_time
@@ -340,6 +375,89 @@ def load_motion_labels_from_csv(csv_path, motion_tokens_count, total_duration):
         
     except Exception as e:
         print(f"Warning: Failed to load CSV file {csv_path}: {e}")
+        return [], total_duration
+
+
+def load_motion_labels_from_jsonl(jsonl_path, motion_tokens_count, total_duration):
+    """
+    从JSONL文件加载motion标签信息
+    
+    Args:
+        jsonl_path: JSONL文件路径
+        motion_tokens_count: motion_tokens的总数量
+        total_duration: 总时长（秒），如果为None，需要从JSONL或其他地方获取
+        
+    Returns:
+        labels: List[Dict]，每个Dict包含motion名称和时间范围信息
+        total_duration: 总时长（秒）
+    
+    Note:
+        JSONL文件每行应该是一个JSON对象，包含以下字段：
+        - actual_start_time: 实际开始时间（秒）
+        - actual_end_time: 实际结束时间（秒）
+        - motion/gesture/label: motion名称
+    """
+    if jsonl_path is None or not os.path.exists(jsonl_path):
+        return [], total_duration
+    
+    try:
+        labels = []
+        max_end_time = None
+        
+        with open(jsonl_path, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f):
+                line = line.strip()
+                if not line:
+                    continue
+                
+                try:
+                    data = json.loads(line)
+                    
+                    # 检查是否有actual_start_time和actual_end_time
+                    actual_start_time = data.get('actual_start_time', None)
+                    actual_end_time = data.get('actual_end_time', None)
+                    
+                    if actual_start_time is None or actual_end_time is None:
+                        continue
+                    
+                    # 检查是否有motion或gesture字段
+                    motion_name = None
+                    for key in ['motion', 'gesture', 'label']:
+                        if key in data:
+                            motion_name = str(data[key])
+                            break
+                    
+                    if not motion_name:
+                        continue
+                    
+                    actual_start_time = float(actual_start_time)
+                    actual_end_time = float(actual_end_time)
+                    
+                    if actual_start_time < actual_end_time:
+                        labels.append({
+                            'motion': motion_name,
+                            'start_time': actual_start_time,
+                            'end_time': actual_end_time,
+                        })
+                        
+                        if max_end_time is None or actual_end_time > max_end_time:
+                            max_end_time = actual_end_time
+                
+                except json.JSONDecodeError as e:
+                    print(f"Warning: Failed to parse line {line_num + 1} in JSONL file {jsonl_path}: {e}")
+                    continue
+                except Exception as e:
+                    print(f"Warning: Error processing line {line_num + 1} in JSONL file {jsonl_path}: {e}")
+                    continue
+        
+        # 如果没有提供total_duration，尝试从JSONL中推断（取最大的actual_end_time）
+        if total_duration is None and max_end_time is not None:
+            total_duration = max_end_time
+        
+        return labels, total_duration
+        
+    except Exception as e:
+        print(f"Warning: Failed to load JSONL file {jsonl_path}: {e}")
         return [], total_duration
 
 
@@ -393,8 +511,8 @@ def generate_label_tokens(motion_tokens, labels, total_duration):
         return label_tokens
     
     # 计算每秒对应的token数量
-    # 理论上应该是 TOKENS_PER_SECOND (12.5)，但实际可能略有差异
-    # 使用实际值：motion_tokens_count / total_duration
+    # TOKENS_PER_SECOND = 12.5 指的是每秒的motion token总数（body和hand交替排列后的总数）
+    # 使用实际值：motion_tokens_count / total_duration（这应该接近 12.5）
     tokens_per_second = motion_tokens_count / total_duration
     
     # 处理每个标签
@@ -537,12 +655,18 @@ if __name__ == "__main__":
                        help="User prompt for jsonl entries")
     
     # Label相关参数
+    parser.add_argument("--jsonl_dir", type=str, default=None,
+                       help="Directory containing JSONL files with actual_start_time and actual_end_time (optional)")
     parser.add_argument("--csv_dir", type=str, default=None,
-                       help="Directory containing CSV files with motion_start and motion_end (optional)")
+                       help="Directory containing CSV files with actual_start_time and actual_end_time (optional)")
+    parser.add_argument("--disable_jsonl_labels", action="store_true", default=False,
+                       help="Disable JSONL files for labels (default: enabled)")
     parser.add_argument("--use_json_labels", action="store_true", default=True,
                        help="Use JSON files for labels (default: True)")
     parser.add_argument("--use_csv_labels", action="store_true", default=False,
                        help="Use CSV files for labels (default: False)")
+    parser.add_argument("--debug_labels", action="store_true", default=False,
+                       help="Enable debug output for label tokens (actual_start_time, actual_end_time, label tokens)")
     
     args = parser.parse_args()
     
@@ -696,8 +820,14 @@ if __name__ == "__main__":
                     labels = []
                     total_duration = None
                     
-                    # 优先使用JSON文件
-                    if args.use_json_labels:
+                    # 优先使用JSONL文件（默认启用）
+                    if not args.disable_jsonl_labels:
+                        jsonl_path = find_jsonl_file(base_name, data_dir, data_dir_name, args.jsonl_dir)
+                        if jsonl_path:
+                            labels, total_duration = load_motion_labels_from_jsonl(jsonl_path, motion_tokens_count, total_duration)
+                    
+                    # 如果JSONL中没有找到，尝试JSON文件
+                    if (not labels or total_duration is None) and args.use_json_labels:
                         json_path = find_json_file(base_name, data_dir, data_dir_name)
                         if json_path:
                             labels, total_duration = load_motion_labels_from_json(json_path, motion_tokens_count, total_duration)
@@ -720,6 +850,7 @@ if __name__ == "__main__":
                             total_duration = len(audio_data) / sr
                         except:
                             # 如果无法获取音频时长，使用motion token数量估算
+                            # TOKENS_PER_SECOND = 12.5 指的是每秒的motion token总数（body和hand交替排列后的总数）
                             total_duration = motion_tokens_count / TOKENS_PER_SECOND
                             print(f"Warning: Cannot determine duration for {base_name}, using estimated duration: {total_duration:.2f}s")
                     
@@ -733,6 +864,35 @@ if __name__ == "__main__":
                             motion_tokens_list.append(int(hand_tokens_array[i]))
                     
                     label_tokens = generate_label_tokens(motion_tokens_list, labels, total_duration)
+                    
+                    # 调试输出：显示actual_start_time, actual_end_time和label token信息
+                    if args.debug_labels and labels and len(labels) > 0:
+                        print(f"\n[DEBUG] {base_name}:")
+                        print(f"  total_duration: {total_duration:.3f}s")
+                        print(f"  motion_tokens_count: {len(motion_tokens_list)}")
+                        print(f"  tokens_per_second: {len(motion_tokens_list) / total_duration:.2f}")
+                        print(f"  labels count: {len(labels)}")
+                        for i, label_info in enumerate(labels[:5]):  # 只显示前5个标签
+                            motion_name = label_info.get('motion', '')
+                            start_time = label_info.get('start_time', 0)
+                            end_time = label_info.get('end_time', 0)
+                            label_value = map_motion_name_to_label(motion_name)
+                            
+                            # 计算对应的token索引
+                            tokens_per_second = len(motion_tokens_list) / total_duration
+                            start_token_idx = int(start_time * tokens_per_second)
+                            end_token_idx = int(end_time * tokens_per_second)
+                            
+                            # 获取实际的label_tokens值
+                            actual_labels = label_tokens[start_token_idx:end_token_idx] if start_token_idx < len(label_tokens) and end_token_idx <= len(label_tokens) else []
+                            unique_labels = set(actual_labels) if actual_labels else set()
+                            
+                            print(f"  Label {i+1}: {motion_name}")
+                            print(f"    actual_start_time: {start_time:.3f}s -> token_idx: {start_token_idx}")
+                            print(f"    actual_end_time: {end_time:.3f}s -> token_idx: {end_token_idx}")
+                            print(f"    label_value: {label_value}")
+                            print(f"    label_tokens[{start_token_idx}:{end_token_idx}]: {unique_labels}")
+                            print(f"    duration: {end_time - start_time:.3f}s, tokens: {end_token_idx - start_token_idx}")
                     
                     # 保存tokens
                     body_motion_output_path = os.path.join(output_dir, base_name + '_body_tokens.pt')
@@ -778,8 +938,8 @@ if __name__ == "__main__":
                 if not jsonl_output_filename.endswith('.jsonl'):
                     jsonl_output_filename += '.jsonl'
             else:
-                # 默认使用数据集名称
-                jsonl_output_filename = f"{data_dir_name}_tokens_with_labels.jsonl"
+                # 默认使用数据集名称，日期为1118
+                jsonl_output_filename = f"{data_dir_name}_tokens_with_labels_1118.jsonl"
             
             jsonl_output_file = os.path.join(jsonl_output_dir, jsonl_output_filename)
             
