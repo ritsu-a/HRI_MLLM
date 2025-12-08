@@ -43,6 +43,9 @@ import yaml
 import random
 import shutil
 import subprocess
+import matplotlib
+matplotlib.use('Agg')  # 使用非交互式后端
+import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -199,12 +202,14 @@ def decode_motion_tokens(motion_tokens, motion_vae, mean_t, std_t, expected_fram
 
 
 def generate_motion_tokens_free_running(model, audio_tokens, device="cuda", max_new_tokens=256, 
-                                       temperature=0.8, top_k=50, repetition_penalty=1.1, enable_model_debug=False):
+                                       temperature=0.8, top_k=50, repetition_penalty=1.1, enable_model_debug=False,
+                                       save_attention_weights=False):
     """Free-running模式：完全自回归生成motion tokens
     
     返回:
         generated_motion_tokens: 生成的motion tokens列表
         predicted_labels: 预测的label列表（如果模型支持label功能），否则为None
+        attention_weights_list: 第一层attention weights列表（如果save_attention_weights=True）
     """
     model.eval()
     
@@ -231,6 +236,7 @@ def generate_motion_tokens_free_running(model, audio_tokens, device="cuda", max_
     current_seq = []
     token_labels = []
     generated_history = []
+    attention_weights_list = []  # 收集第一层的attention weights
     
     interleave_audios, interleave_motions = 1, 1
     
@@ -252,10 +258,277 @@ def generate_motion_tokens_free_running(model, audio_tokens, device="cuda", max_
                     if enable_model_debug and hasattr(model, 'label_classifier'):
                         model._debug_label_loss = True
                     
-                    # 推理时不需要GT label_tokens，传入None
-                    output = model(input_data=inputs, attention_mask=attn_mask, labels=labels, label_tokens=None)
+                    # 注意：在free-running模式下，我们需要motion logits来生成下一个token
+                    # 现在模型已经修改为在正常模式下也能计算label_logits并添加label embedding
+                    # 所以我们可以使用正常模式（use_label_prediction_mode=False），
+                    # 这样既能得到motion logits，又能使用预测的label影响生成
+                    # 注意：在生成过程中不提取attention weights，因为每次只生成一个token
+                    # 我们会在生成完成后用完整序列重新forward一次来获取完整的attention matrix
+                    output = model(
+                        input_data=inputs, 
+                        attention_mask=attn_mask, 
+                        labels=labels, 
+                        label_tokens=None,
+                        use_label_prediction_mode=False  # 使用正常模式，模型会自动计算label并添加embedding
+                    )
                     
                     if enable_model_debug and hasattr(model, 'label_classifier'):
+                        model._debug_label_loss = False
+                    
+                    # 检查logits是否存在
+                    if output.logits is None:
+                        raise ValueError("Model output logits is None. This should not happen in free-running mode.")
+                    next_token_logits = output.logits[0, -1, :]
+                    
+                    # 如果模型支持label功能，提取当前motion token位置的label预测
+                    if has_label_support and hasattr(output, 'label_logits') and output.label_logits is not None:
+                        # 找到最后一个motion token位置（当前要生成的位置）
+                        motion_mask = (labels[0] != -100)
+                        if motion_mask.any():
+                            # 当前序列中最后一个motion token位置（即即将生成的位置）
+                            # 注意：由于我们还没有添加新的motion token，所以需要找到最后一个motion位置
+                            motion_positions = torch.where(motion_mask)[0]
+                            if len(motion_positions) > 0:
+                                # 如果已经有motion token，取最后一个；否则这是第一个motion token
+                                last_motion_idx = motion_positions[-1].item()
+                                # 但实际我们要预测的是下一个motion token的label
+                                # 由于label是在motion token位置预测的，我们需要在生成motion token后获取
+                                # 这里先不处理，在生成motion token后再获取
+                            else:
+                                # 这是第一个motion token，label会在生成后获取
+                                pass
+                    
+                    if repetition_penalty != 1.0 and generated_history:
+                        for token_id in set(generated_history):
+                            if token_id not in special_token_ids and token_id < next_token_logits.size(-1):
+                                next_token_logits[token_id] = next_token_logits[token_id] / repetition_penalty
+                    # 采样策略（稳健处理 temperature 与 top_k）
+                    if temperature is not None and temperature > 0:
+                        next_token_logits = next_token_logits / temperature
+                        if top_k is not None and top_k > 0:
+                            k = min(int(top_k), next_token_logits.size(-1))
+                            top_k_logits, top_k_indices = torch.topk(next_token_logits, k)
+                            masked = torch.full_like(next_token_logits, float('-inf'))
+                            masked[top_k_indices] = top_k_logits
+                            next_token_logits = masked
+                        probs = torch.softmax(next_token_logits, dim=-1)
+                        if torch.isnan(probs).any() or torch.isinf(probs).any() or probs.sum() <= 0:
+                            next_token = torch.argmax(next_token_logits, dim=-1).item()
+                        else:
+                            next_token = torch.multinomial(probs, 1).item()
+                    else:
+                        # temperature<=0 时，使用贪心选择，避免除零
+                        if top_k is not None and top_k > 0:
+                            k = min(int(top_k), next_token_logits.size(-1))
+                            top_k_logits, top_k_indices = torch.topk(next_token_logits, k)
+                            masked = torch.full_like(next_token_logits, float('-inf'))
+                            masked[top_k_indices] = top_k_logits
+                            next_token_logits = masked
+                        next_token = torch.argmax(next_token_logits, dim=-1).item()
+                    
+                    tokens_to_add = []
+                    tokens_labels_to_add = []
+                    
+                    if next_token == gesture_start_token_id:
+                        tokens_to_add.append(gesture_start_token_id)
+                        tokens_labels_to_add.append(gesture_start_token_id)
+                        tokens_to_add.append(audio_gesture_start_token_id)
+                        tokens_labels_to_add.append(-100)
+                    elif next_token == gesture_end_token_id:
+                        tokens_to_add.append(gesture_end_token_id)
+                        tokens_labels_to_add.append(gesture_end_token_id)
+                        tokens_to_add.append(audio_gesture_end_token_id)
+                        tokens_labels_to_add.append(-100)
+                    elif next_token in special_token_ids:
+                        tokens_to_add.append(next_token)
+                        tokens_labels_to_add.append(-100)
+                    else:
+                        vocab_size = model.config.vocab_size
+                        if next_token >= vocab_size:
+                            next_token = vocab_size - 1
+                        
+                        tokens_to_add.append(next_token)
+                        tokens_labels_to_add.append(next_token)
+                        generated_motion_tokens.append(next_token)
+                        generated_history.append(next_token)
+                        
+                        # 如果模型支持label功能，在生成motion token后，获取该位置的label预测
+                        # 注意：label是在motion token位置预测的，所以需要在包含新motion token的序列中获取
+                        if has_label_support:
+                            # 重新forward一次，这次包含新生成的motion token，使用label预测模式
+                            temp_seq = current_seq + [next_token]
+                            temp_labels = token_labels + [next_token]
+                            temp_inputs = torch.tensor(temp_seq).unsqueeze(0).to(device)
+                            temp_attn = torch.ones_like(temp_inputs)
+                            temp_labels_tensor = torch.tensor(temp_labels).unsqueeze(0).to(device)
+                            # 临时启用模型内部的调试模式（仅用于诊断）
+                            if enable_model_debug and hasattr(model, 'label_classifier'):
+                                model._debug_label_loss = True
+                            
+                            # 使用label预测模式来获取label预测
+                            temp_output = model(
+                                input_data=temp_inputs, 
+                                attention_mask=temp_attn, 
+                                labels=temp_labels_tensor, 
+                                label_tokens=None,
+                                use_label_prediction_mode=True  # 使用label预测模式
+                            )
+                            
+                            if enable_model_debug and hasattr(model, 'label_classifier'):
+                                model._debug_label_loss = False
+                            if hasattr(temp_output, 'label_logits') and temp_output.label_logits is not None:
+                                # 取最后一个motion token位置的label预测（即刚生成的motion token）
+                                motion_mask = (temp_labels_tensor[0] != -100)
+                                if motion_mask.any():
+                                    last_motion_idx = torch.where(motion_mask)[0][-1].item()
+                                    if last_motion_idx < temp_output.label_logits.shape[1]:
+                                        label_logits_at_motion = temp_output.label_logits[0, last_motion_idx, :]
+                                        predicted_label = torch.argmax(label_logits_at_motion, dim=-1).item()
+                                        predicted_labels.append(predicted_label)
+                    
+                    for token, label in zip(tokens_to_add, tokens_labels_to_add):
+                        current_seq.append(token)
+                        token_labels.append(label)
+                    
+                    if len(generated_history) > 100:
+                        generated_history = generated_history[-100:]
+                
+                if len(generated_motion_tokens) >= max_new_tokens:
+                    break
+    
+    # 如果需要保存attention weights，用完整序列重新forward一次以获取完整的attention matrix
+    if save_attention_weights and len(current_seq) > 0:
+        print("   [Attention] Forwarding complete sequence to get full attention weights...")
+        try:
+            full_inputs = torch.tensor(current_seq).unsqueeze(0).to(device)
+            full_attn_mask = torch.ones_like(full_inputs)
+            full_labels = torch.tensor(token_labels).unsqueeze(0).to(device)
+            
+            full_output = model(
+                input_data=full_inputs,
+                attention_mask=full_attn_mask,
+                labels=full_labels,
+                label_tokens=None,
+                use_label_prediction_mode=False,
+                output_attentions=True
+            )
+            
+            # 提取第一层的attention weights
+            if hasattr(full_output, 'attentions') and full_output.attentions is not None:
+                if len(full_output.attentions) > 0:
+                    first_layer_attn = full_output.attentions[0]  # [batch_size, num_heads, seq_len, seq_len]
+                    # 平均所有head的attention weights
+                    first_layer_attn_mean = first_layer_attn[0].mean(dim=0).cpu().numpy()  # [seq_len, seq_len]
+                    attention_weights_list = [first_layer_attn_mean]  # 替换为完整的attention matrix
+                    print(f"   [Attention] Extracted full attention matrix: shape {first_layer_attn_mean.shape}")
+        except Exception as e:
+            print(f"   ⚠️  Failed to extract full attention weights: {e}")
+            attention_weights_list = []
+    
+    filtered_tokens = [t for t in generated_motion_tokens if t not in special_token_ids]
+    # 确保predicted_labels长度与filtered_tokens一致
+    if has_label_support:
+        # 如果长度不一致，截断或填充
+        if len(predicted_labels) > len(filtered_tokens):
+            predicted_labels = predicted_labels[:len(filtered_tokens)]
+        elif len(predicted_labels) < len(filtered_tokens):
+            # 如果缺少，用-1填充（表示未知）
+            predicted_labels.extend([-1] * (len(filtered_tokens) - len(predicted_labels)))
+        if save_attention_weights:
+            return filtered_tokens, predicted_labels if predicted_labels else None, attention_weights_list
+        else:
+            return filtered_tokens, predicted_labels if predicted_labels else None
+    else:
+        if save_attention_weights:
+            return filtered_tokens, None, attention_weights_list
+        else:
+            return filtered_tokens, None
+
+
+def generate_motion_tokens_free_running_with_fixed_label(model, audio_tokens, fixed_label=0, device="cuda", max_new_tokens=256,
+                                                         temperature=0.8, top_k=50, repetition_penalty=1.1, enable_model_debug=False):
+    """Free-running模式（使用固定label）：完全自回归生成motion tokens，但使用固定的label值（如0）的one-hot向量替代模型预测的label_logits
+    
+    参数:
+        fixed_label: 固定的label值（0-8），默认为0
+    
+    返回:
+        generated_motion_tokens: 生成的motion tokens列表
+        used_labels: 使用的固定labels列表
+    """
+    model.eval()
+    
+    # 检查模型是否支持label功能
+    has_label_support = hasattr(model, 'label_classifier')
+    if not has_label_support:
+        raise ValueError("模型不支持label功能，无法使用固定label模式")
+    
+    gesture_start_token_id = getattr(model.config, 'gesture_start_token_id', 512*2 + 2)
+    audio_gesture_start_token_id = getattr(model.config, 'audio_gesture_start_token_id', 512*2 + 3)
+    gesture_end_token_id = getattr(model.config, 'gesture_end_token_id', 512*2 + 4)
+    audio_gesture_end_token_id = getattr(model.config, 'audio_gesture_end_token_id', 512*2 + 5)
+    
+    special_token_ids = {
+        gesture_start_token_id,
+        audio_gesture_start_token_id,
+        gesture_end_token_id,
+        audio_gesture_end_token_id
+    }
+    
+    # 过滤输入中的special token
+    audio_tokens = [t for t in audio_tokens if t not in special_token_ids]
+    
+    generated_motion_tokens = []
+    used_labels = []  # 记录使用的固定labels
+    current_seq = []
+    token_labels = []
+    generated_history = []
+    
+    interleave_audios, interleave_motions = 1, 1
+    
+    # 创建一个包装的nn.Module来替换label_classifier，返回固定label的one-hot
+    class FixedLabelClassifier(nn.Module):
+        def __init__(self, label_value, device):
+            super().__init__()
+            self.label_value = label_value
+            self.device = device
+        
+        def forward(self, x):
+            batch_size = x.shape[0]
+            one_hot = torch.zeros(batch_size, 9, device=self.device, dtype=x.dtype)
+            one_hot[:, self.label_value] = 1.0
+            return one_hot
+    
+    # 保存原始的label_classifier
+    original_label_classifier = model.label_classifier
+    # 创建固定label分类器
+    fixed_label_classifier = FixedLabelClassifier(fixed_label, device)
+    
+    with torch.no_grad():
+        for i, audio_token in enumerate(audio_tokens):
+            current_seq.append(audio_token)
+            token_labels.append(-100)
+            
+            if (i + 1) % interleave_audios == 0:
+                for j in range(interleave_motions):
+                    if len(generated_motion_tokens) >= max_new_tokens:
+                        break
+                    
+                    inputs = torch.tensor(current_seq).unsqueeze(0).to(device)
+                    attn_mask = torch.ones_like(inputs)
+                    labels = torch.tensor(token_labels).unsqueeze(0).to(device)
+                    
+                    # 临时替换label_classifier为固定label分类器
+                    model.label_classifier = fixed_label_classifier
+                    
+                    # 临时启用模型内部的调试模式（仅用于诊断）
+                    if enable_model_debug:
+                        model._debug_label_loss = True
+                    
+                    # 推理时不需要GT label_tokens，传入None（因为我们已经通过替换label_classifier来使用固定label）
+                    output = model(input_data=inputs, attention_mask=attn_mask, labels=labels, label_tokens=None)
+                    
+                    if enable_model_debug:
                         model._debug_label_loss = False
                     next_token_logits = output.logits[0, -1, :]
                     
@@ -312,33 +585,7 @@ def generate_motion_tokens_free_running(model, audio_tokens, device="cuda", max_
                         tokens_labels_to_add.append(next_token)
                         generated_motion_tokens.append(next_token)
                         generated_history.append(next_token)
-                        
-                        # 如果模型支持label功能，在生成motion token后，需要再次forward获取该位置的label预测
-                        if has_label_support:
-                            # 重新forward一次，这次包含新生成的motion token
-                            temp_seq = current_seq + [next_token]
-                            temp_labels = token_labels + [next_token]
-                            temp_inputs = torch.tensor(temp_seq).unsqueeze(0).to(device)
-                            temp_attn = torch.ones_like(temp_inputs)
-                            temp_labels_tensor = torch.tensor(temp_labels).unsqueeze(0).to(device)
-                            # 临时启用模型内部的调试模式（仅用于诊断）
-                            if enable_model_debug and hasattr(model, 'label_classifier'):
-                                model._debug_label_loss = True
-                            
-                            temp_output = model(input_data=temp_inputs, attention_mask=temp_attn, 
-                                              labels=temp_labels_tensor, label_tokens=None)
-                            
-                            if enable_model_debug and hasattr(model, 'label_classifier'):
-                                model._debug_label_loss = False
-                            if hasattr(temp_output, 'label_logits') and temp_output.label_logits is not None:
-                                # 取最后一个motion token位置的label预测
-                                motion_mask = (temp_labels_tensor[0] != -100)
-                                if motion_mask.any():
-                                    last_motion_idx = torch.where(motion_mask)[0][-1].item()
-                                    if last_motion_idx < temp_output.label_logits.shape[1]:
-                                        label_logits_at_motion = temp_output.label_logits[0, last_motion_idx, :]
-                                        predicted_label = torch.argmax(label_logits_at_motion, dim=-1).item()
-                                        predicted_labels.append(predicted_label)
+                        used_labels.append(fixed_label)  # 记录使用的固定label
                     
                     for token, label in zip(tokens_to_add, tokens_labels_to_add):
                         current_seq.append(token)
@@ -350,18 +597,17 @@ def generate_motion_tokens_free_running(model, audio_tokens, device="cuda", max_
                 if len(generated_motion_tokens) >= max_new_tokens:
                     break
     
+    # 恢复原始的label_classifier
+    model.label_classifier = original_label_classifier
+    
     filtered_tokens = [t for t in generated_motion_tokens if t not in special_token_ids]
-    # 确保predicted_labels长度与filtered_tokens一致
-    if has_label_support:
-        # 如果长度不一致，截断或填充
-        if len(predicted_labels) > len(filtered_tokens):
-            predicted_labels = predicted_labels[:len(filtered_tokens)]
-        elif len(predicted_labels) < len(filtered_tokens):
-            # 如果缺少，用-1填充（表示未知）
-            predicted_labels.extend([-1] * (len(filtered_tokens) - len(predicted_labels)))
-        return filtered_tokens, predicted_labels if predicted_labels else None
-    else:
-        return filtered_tokens, None
+    # 确保used_labels长度与filtered_tokens一致
+    if len(used_labels) > len(filtered_tokens):
+        used_labels = used_labels[:len(filtered_tokens)]
+    elif len(used_labels) < len(filtered_tokens):
+        used_labels.extend([fixed_label] * (len(filtered_tokens) - len(used_labels)))
+    
+    return filtered_tokens, used_labels if used_labels else None
 
 
 def generate_motion_tokens_free_running_with_gt_labels(model, audio_tokens, label_tokens_gt, device="cuda", max_new_tokens=256, 
@@ -621,18 +867,28 @@ def generate_motion_tokens_teacher_forcing(model, audio_tokens, motion_tokens_gt
         labels = torch.tensor(token_labels).unsqueeze(0).to(device)
         
         # 前向传播（推理时不需要GT label_tokens，传入None）
+        # 注意：teacher-forcing模式需要motion logits，所以不使用use_label_prediction_mode
+        # 如果需要label预测，可以在正常模式下进行，模型会自动计算label_logits（如果支持）
         # 临时启用模型内部的调试模式（仅用于诊断，不影响模型逻辑）
         if enable_model_debug and hasattr(model, 'label_classifier'):
             model._debug_label_loss = True
         
-        # 保存修改前的hidden_states（用于验证label embedding是否被添加）
-        # 注意：我们无法直接访问模型内部的hidden_states，但可以通过对比两次forward的结果来验证
-        # 这里我们只检查label_logits的输出
-        
-        output = model(input_data=inputs, attention_mask=attn_mask, labels=labels, label_tokens=None)
+        # 不使用label预测模式，因为我们需要motion logits
+        # 模型仍然会计算label_logits（如果支持label功能），但不会将motion token替换为motion_blank
+        output = model(
+            input_data=inputs, 
+            attention_mask=attn_mask, 
+            labels=labels, 
+            label_tokens=None,
+            use_label_prediction_mode=False  # 不使用label预测模式，因为需要motion logits
+        )
         
         if enable_model_debug and hasattr(model, 'label_classifier'):
             model._debug_label_loss = False
+        
+        # 检查logits是否存在
+        if output.logits is None:
+            raise ValueError("Model output logits is None. This should not happen in teacher-forcing mode.")
         logits = output.logits[0]  # [seq_len, vocab_size]
         
         # 输出label准确率（如果有）
@@ -757,6 +1013,233 @@ def compute_token_accuracy(predicted, ground_truth):
     
     correct = sum(1 for p, g in zip(predicted, ground_truth) if p == g)
     return correct / min_len if min_len > 0 else 0.0
+
+
+def visualize_attention_weights(attention_weights_list, output_path, token_sequence=None, title="First Layer Attention Weights"):
+    """
+    可视化第一层的attention weights
+    
+    参数:
+        attention_weights_list: attention weights列表，每个元素是[seq_len, seq_len]的numpy数组
+        output_path: 输出图片路径
+        token_sequence: token序列（可选），用于标记奇数和偶数位置
+        title: 图片标题
+    """
+    if not attention_weights_list:
+        print("⚠️  No attention weights to visualize")
+        return
+    
+    # 合并所有attention weights（取最后一个，因为它包含了完整的序列信息）
+    # 或者我们可以可视化每个生成步骤的attention
+    # 这里我们可视化最后一个attention weights（包含完整序列）
+    final_attn = attention_weights_list[-1]  # [seq_len, seq_len]
+    
+    fig, axes = plt.subplots(1, 2, figsize=(20, 8))
+    
+    # 左图：完整的attention matrix
+    ax1 = axes[0]
+    im1 = ax1.imshow(final_attn, cmap='viridis', aspect='auto', interpolation='nearest')
+    ax1.set_title(f'{title} - Full Sequence', fontsize=14, fontweight='bold')
+    ax1.set_xlabel('Key Position (Token Index)', fontsize=12)
+    ax1.set_ylabel('Query Position (Token Index)', fontsize=12)
+    plt.colorbar(im1, ax=ax1, label='Attention Weight')
+    
+    # 标记奇数和偶数位置（如果提供了token序列）
+    if token_sequence is not None and len(token_sequence) <= final_attn.shape[0]:
+        # 在x轴上标记
+        odd_positions = [i for i in range(len(token_sequence)) if i % 2 == 0]  # 偶数索引（0, 2, 4...）对应奇数位置（1st, 3rd, 5th...）
+        even_positions = [i for i in range(len(token_sequence)) if i % 2 == 1]  # 奇数索引（1, 3, 5...）对应偶数位置（2nd, 4th, 6th...）
+        
+        # 添加垂直分割线
+        for pos in odd_positions[1:]:  # 跳过第一个
+            ax1.axvline(x=pos-0.5, color='red', linestyle='--', alpha=0.3, linewidth=0.5)
+        for pos in even_positions:
+            ax1.axvline(x=pos-0.5, color='blue', linestyle='--', alpha=0.3, linewidth=0.5)
+        
+        # 添加水平分割线
+        for pos in odd_positions[1:]:
+            ax1.axhline(y=pos-0.5, color='red', linestyle='--', alpha=0.3, linewidth=0.5)
+        for pos in even_positions:
+            ax1.axhline(y=pos-0.5, color='blue', linestyle='--', alpha=0.3, linewidth=0.5)
+    
+    # 右图：分析奇数和偶数位置的attention模式
+    ax2 = axes[1]
+    
+    # 计算每个query位置对奇数位置和偶数位置的attention总和
+    seq_len = final_attn.shape[0]
+    odd_attention = np.zeros(seq_len)
+    even_attention = np.zeros(seq_len)
+    
+    for query_pos in range(seq_len):
+        # 奇数位置（索引0, 2, 4...）
+        odd_indices = [i for i in range(seq_len) if i % 2 == 0]
+        # 偶数位置（索引1, 3, 5...）
+        even_indices = [i for i in range(seq_len) if i % 2 == 1]
+        
+        if odd_indices:
+            odd_attention[query_pos] = final_attn[query_pos, odd_indices].sum()
+        if even_indices:
+            even_attention[query_pos] = final_attn[query_pos, even_indices].sum()
+    
+    x_positions = np.arange(seq_len)
+    width = 0.35
+    ax2.bar(x_positions - width/2, odd_attention, width, label='Attention to Odd Positions (1st, 3rd, 5th...)', alpha=0.7, color='red')
+    ax2.bar(x_positions + width/2, even_attention, width, label='Attention to Even Positions (2nd, 4th, 6th...)', alpha=0.7, color='blue')
+    ax2.set_xlabel('Query Position (Token Index)', fontsize=12)
+    ax2.set_ylabel('Total Attention Weight', fontsize=12)
+    ax2.set_title('Attention Distribution: Odd vs Even Positions', fontsize=14, fontweight='bold')
+    ax2.legend(fontsize=10)
+    ax2.grid(True, alpha=0.3)
+    
+    # 标记奇数和偶数位置
+    for i in range(0, seq_len, 2):
+        ax2.axvline(x=i, color='red', linestyle=':', alpha=0.2, linewidth=0.5)
+    for i in range(1, seq_len, 2):
+        ax2.axvline(x=i, color='blue', linestyle=':', alpha=0.2, linewidth=0.5)
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"✅ Attention weights visualization saved to: {output_path}")
+    
+    # 打印统计信息
+    print(f"\n📊 Attention Statistics:")
+    print(f"   - Sequence length: {seq_len}")
+    print(f"   - Average attention to odd positions: {odd_attention.mean():.4f}")
+    print(f"   - Average attention to even positions: {even_attention.mean():.4f}")
+    print(f"   - Ratio (odd/even): {odd_attention.mean() / even_attention.mean() if even_attention.mean() > 0 else 'N/A'}")
+
+
+def save_attention_weights_numpy(attention_weights_list, output_path):
+    """保存attention weights为numpy文件"""
+    if not attention_weights_list:
+        print("⚠️  No attention weights to save")
+        return
+    
+    # 保存所有attention weights
+    attention_array = np.array(attention_weights_list)  # [num_steps, seq_len, seq_len]
+    np.save(output_path, attention_array)
+    print(f"✅ Attention weights saved to: {output_path}")
+
+
+def merge_five_videos(v0, v1, v2, v3, v4, out_path, layout="hstack", height=720, crf=18,
+                      preset="veryfast", copy_first_audio=True,
+                      label0="GT", label1="Teacher-Forcing", label2="FR-Label=0", label3="FR-GT-Label", label4="FR-Pred-Label",
+                      fontfile=None, fontsize=36, fontcolor="white",
+                      box=True, boxcolor="black@0.5", boxborderw=10):
+    """
+    使用ffmpeg将五个视频横向合并，并在每个视频上添加文字标签
+    
+    参数:
+        v0, v1, v2, v3, v4: 五个输入视频路径
+        out_path: 输出视频路径
+        layout: 布局方式，"hstack"表示横向排列，"vstack"表示纵向排列
+        height: 输出视频高度
+        crf: 视频质量参数，值越小质量越高（默认18）
+        preset: 编码速度预设（ultrafast, veryfast, fast, medium, slow等）
+        copy_first_audio: 是否使用第一个视频的音频
+        label0, label1, label2, label3, label4: 五个视频的标签文字
+        fontfile: 字体文件路径（可选）
+        fontsize: 字体大小（默认36）
+        fontcolor: 字体颜色（默认白色）
+        box: 是否在文字周围添加半透明背景框（默认True）
+        boxcolor: 背景框颜色（默认黑色半透明）
+        boxborderw: 背景框边框宽度（默认10）
+    """
+    def build_drawtext_filter(label_text):
+        """构建drawtext滤镜参数"""
+        dt_params = [
+            f"text='{label_text}'",
+            f"fontsize={fontsize}",
+            f"fontcolor={fontcolor}",
+            "x=10",
+            "y=10"
+        ]
+        
+        if box:
+            dt_params.append(f"box=1:boxcolor={boxcolor}:boxborderw={boxborderw}")
+        
+        if fontfile:
+            dt_params.append(f"fontfile={fontfile}")
+        
+        return "drawtext=" + ":".join(dt_params)
+    
+    # 构建ffmpeg命令
+    if layout == "hstack":
+        # 横向合并
+        filter_complex = (
+            f"[0:v]scale=-1:{height}[v0scaled];"
+            f"[1:v]scale=-1:{height}[v1scaled];"
+            f"[2:v]scale=-1:{height}[v2scaled];"
+            f"[3:v]scale=-1:{height}[v3scaled];"
+            f"[4:v]scale=-1:{height}[v4scaled];"
+            f"[v0scaled]{build_drawtext_filter(label0)}[v0text];"
+            f"[v1scaled]{build_drawtext_filter(label1)}[v1text];"
+            f"[v2scaled]{build_drawtext_filter(label2)}[v2text];"
+            f"[v3scaled]{build_drawtext_filter(label3)}[v3text];"
+            f"[v4scaled]{build_drawtext_filter(label4)}[v4text];"
+            f"[v0text][v1text][v2text][v3text][v4text]hstack=inputs=5[v]"
+        )
+    elif layout == "vstack":
+        # 纵向合并
+        filter_complex = (
+            f"[0:v]scale=-1:{height}[v0scaled];"
+            f"[1:v]scale=-1:{height}[v1scaled];"
+            f"[2:v]scale=-1:{height}[v2scaled];"
+            f"[3:v]scale=-1:{height}[v3scaled];"
+            f"[4:v]scale=-1:{height}[v4scaled];"
+            f"[v0scaled]{build_drawtext_filter(label0)}[v0text];"
+            f"[v1scaled]{build_drawtext_filter(label1)}[v1text];"
+            f"[v2scaled]{build_drawtext_filter(label2)}[v2text];"
+            f"[v3scaled]{build_drawtext_filter(label3)}[v3text];"
+            f"[v4scaled]{build_drawtext_filter(label4)}[v4text];"
+            f"[v0text][v1text][v2text][v3text][v4text]vstack=inputs=5[v]"
+        )
+    else:
+        raise ValueError(f"不支持的布局方式: {layout}")
+    
+    # 构建完整的ffmpeg命令
+    cmd = [
+        "ffmpeg",
+        "-y",  # 覆盖输出文件
+        "-i", v0,
+        "-i", v1,
+        "-i", v2,
+        "-i", v3,
+        "-i", v4,
+        "-filter_complex", filter_complex,
+        "-map", "[v]",
+    ]
+    
+    if copy_first_audio:
+        cmd.extend(["-map", "0:a?"])  # 使用第一个视频的音频（如果存在）
+    
+    cmd.extend([
+        "-c:v", "libx264",
+        "-crf", str(crf),
+        "-preset", preset,
+        "-c:a", "copy",
+        out_path
+    ])
+    
+    # 执行ffmpeg命令
+    print(f"正在合并5个视频...")
+    print(f"命令: {' '.join(cmd)}")
+    
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True
+        )
+        print(f"✅ 视频合并成功: {out_path}")
+    except subprocess.CalledProcessError as e:
+        print(f"❌ ffmpeg执行失败:")
+        print(f"错误信息: {e.stderr}")
+        raise
 
 
 def merge_four_videos(v0, v1, v2, v3, out_path, layout="hstack", height=720, crf=18,
@@ -1019,6 +1502,8 @@ def main():
                        help='Random seed for sampling')
     parser.add_argument('--enable_model_debug', action='store_true',
                        help='Enable model internal debug mode to diagnose label_logits issues')
+    parser.add_argument('--save_attention_weights', action='store_true',
+                       help='Save and visualize first layer attention weights during generation')
     
     args = parser.parse_args()
     
@@ -1104,8 +1589,9 @@ def main():
     results = {
         'gt': [],
         'teacher_forcing': [],
-        'free_running': [],
-        'free_running_gt_labels': []  # 新增：使用GT label one-hot的free-running模式
+        'free_running': [],  # Free-running with predicted label
+        'free_running_label0': [],  # Free-running with label=0
+        'free_running_gt_labels': []  # Free-running with GT label
     }
     
     # 处理每个样本
@@ -1213,8 +1699,8 @@ def main():
                 'error': str(e)
             })
         
-        # 3. Free-running模式
-        print("\n--- Free-running Mode ---")
+        # 3. Free-running模式（使用模型预测的label）
+        print("\n--- Free-running Mode (with Predicted Label) ---")
         try:
             result_fr = generate_motion_tokens_free_running(
                 motion_adaptor, audio_tokens, device="cuda",
@@ -1222,14 +1708,27 @@ def main():
                 temperature=args.temperature,
                 top_k=args.top_k,
                 repetition_penalty=args.repetition_penalty,
-                enable_model_debug=args.enable_model_debug
+                enable_model_debug=args.enable_model_debug,
+                save_attention_weights=args.save_attention_weights
             )
-            if len(result_fr) == 2:
-                predicted_tokens_fr, predicted_labels_fr = result_fr
+            if args.save_attention_weights:
+                if len(result_fr) == 3:
+                    predicted_tokens_fr, predicted_labels_fr, attention_weights_fr = result_fr
+                elif len(result_fr) == 2:
+                    predicted_tokens_fr, predicted_labels_fr = result_fr
+                    attention_weights_fr = []
+                else:
+                    predicted_tokens_fr = result_fr
+                    predicted_labels_fr = None
+                    attention_weights_fr = []
             else:
-                # 兼容旧版本（返回1个值）
-                predicted_tokens_fr = result_fr
-                predicted_labels_fr = None
+                if len(result_fr) == 2:
+                    predicted_tokens_fr, predicted_labels_fr = result_fr
+                else:
+                    # 兼容旧版本（返回1个值）
+                    predicted_tokens_fr = result_fr
+                    predicted_labels_fr = None
+                attention_weights_fr = []
             
             if len(predicted_tokens_fr) > 0:
                 print(f"Generated {len(predicted_tokens_fr)} motion tokens")
@@ -1261,9 +1760,32 @@ def main():
                     if has_label_support and predicted_labels_fr is not None:
                         result_dict['predicted_labels'] = predicted_labels_fr
                     results['free_running'].append(result_dict)
-                    print(f"✅ Free-running motion decoded successfully")
+                    print(f"✅ Free-running (predicted label) motion decoded successfully")
+                    
+                    # 保存和可视化attention weights
+                    if args.save_attention_weights and attention_weights_fr:
+                        print("\n--- Saving and Visualizing Attention Weights ---")
+                        # 保存numpy文件
+                        attn_npy_path = os.path.join(sample_dir, "attention_weights_first_layer.npy")
+                        save_attention_weights_numpy(attention_weights_fr, attn_npy_path)
+                        
+                        # 可视化最后一个attention weights（包含完整序列）
+                        # 构建完整的token序列用于标记（包含audio和motion tokens）
+                        # 注意：在free-running生成中，序列是交替的audio和motion tokens
+                        # 我们需要构建完整的序列来正确标记奇数和偶数位置
+                        if len(attention_weights_fr) > 0:
+                            attn_shape = attention_weights_fr[-1].shape[0]
+                            # 由于我们不知道确切的序列结构，我们假设序列长度就是attention matrix的大小
+                            # 在实际使用中，奇数和偶数位置应该对应两类不同的token（body和hand）
+                            attn_viz_path = os.path.join(sample_dir, "attention_weights_first_layer.png")
+                            visualize_attention_weights(
+                                attention_weights_fr, 
+                                attn_viz_path,
+                                token_sequence=list(range(attn_shape)),  # 使用索引作为标记
+                                title=f"First Layer Attention Weights - Sample {sample_idx}\n(Odd positions: 1st, 3rd, 5th... | Even positions: 2nd, 4th, 6th...)"
+                            )
         except Exception as e:
-            print(f"❌ Free-running mode failed: {e}")
+            print(f"❌ Free-running (predicted label) mode failed: {e}")
             import traceback
             traceback.print_exc()
             results['free_running'].append({
@@ -1272,7 +1794,63 @@ def main():
                 'error': str(e)
             })
         
-        # 4. Free-running模式（使用GT label one-hot）
+        # 4. Free-running模式（label全设为0）
+        if has_label_support:
+            print("\n--- Free-running Mode (with Label=0) ---")
+            try:
+                result_fr_label0 = generate_motion_tokens_free_running_with_fixed_label(
+                    motion_adaptor, audio_tokens, fixed_label=0, device="cuda",
+                    max_new_tokens=min(args.max_motion_tokens, len(motion_tokens_gt) * 2),
+                    temperature=args.temperature,
+                    top_k=args.top_k,
+                    repetition_penalty=args.repetition_penalty,
+                    enable_model_debug=args.enable_model_debug
+                )
+                if len(result_fr_label0) == 2:
+                    predicted_tokens_fr_label0, used_labels_fr_label0 = result_fr_label0
+                else:
+                    predicted_tokens_fr_label0 = result_fr_label0
+                    used_labels_fr_label0 = None
+                
+                if len(predicted_tokens_fr_label0) > 0:
+                    print(f"Generated {len(predicted_tokens_fr_label0)} motion tokens (with label=0)")
+                    
+                    if used_labels_fr_label0 is not None:
+                        print(f"Used fixed labels (all 0): {used_labels_fr_label0[:10]}...")  # 只显示前10个
+                    
+                    # 解码生成的motion tokens
+                    motion_pkl_fr_label0 = decode_motion_tokens(predicted_tokens_fr_label0, motion_vae, mean_t, std_t)
+                    if motion_pkl_fr_label0 is not None:
+                        fr_label0_pkl_path = os.path.join(sample_dir, "free_running_label0_motion.pkl")
+                        with open(fr_label0_pkl_path, 'wb') as f:
+                            pickle.dump(motion_pkl_fr_label0, f)
+                        
+                        fr_label0_csv_path = os.path.join(sample_dir, "free_running_label0_motion.csv")
+                        motion_csv = load_motion_pkl_as_csv_data(fr_label0_pkl_path)
+                        np.savetxt(fr_label0_csv_path, motion_csv, delimiter=',', fmt='%.8f')
+                        
+                        result_dict = {
+                            'sample_idx': sample_idx,
+                            'generated_tokens': len(predicted_tokens_fr_label0),
+                            'status': 'success'
+                        }
+                        if used_labels_fr_label0 is not None:
+                            result_dict['used_labels'] = used_labels_fr_label0
+                        results['free_running_label0'].append(result_dict)
+                        print(f"✅ Free-running (label=0) motion decoded successfully")
+            except Exception as e:
+                print(f"❌ Free-running (label=0) mode failed: {e}")
+                import traceback
+                traceback.print_exc()
+                results['free_running_label0'].append({
+                    'sample_idx': sample_idx,
+                    'status': 'failed',
+                    'error': str(e)
+                })
+        else:
+            print("\n--- Skipping Free-running (Label=0) Mode: Model does not support labels ---")
+        
+        # 5. Free-running模式（使用GT label one-hot）
         # 调试：检查label_tokens是否存在
         if has_label_support:
             print(f"\n[DEBUG] 检查label_tokens:")
@@ -1388,6 +1966,17 @@ def main():
                         motion_fps=25
                     )
                 
+                # Free-running (label=0) 视频
+                if os.path.exists(os.path.join(sample_dir, "free_running_label0_motion.csv")):
+                    vis_audio_motion(
+                        os.path.join(sample_dir, "free_running_label0_motion.csv"),
+                        output_path=os.path.join(sample_dir, "free_running_label0_motion.mp4"),
+                        audio_path=audio_copy_path,
+                        robot_type="g1_brainco",
+                        rate_limit=False,
+                        motion_fps=25
+                    )
+                
                 # Free-running (GT label one-hot) 视频
                 if os.path.exists(os.path.join(sample_dir, "free_running_gt_labels_motion.csv")):
                     vis_audio_motion(
@@ -1403,16 +1992,48 @@ def main():
             except Exception as e:
                 print(f"⚠️  Visualization failed: {e}")
     
-        # 合并视频进行对比（优先4个视频，如果不存在则使用3个）
+        # 合并视频进行对比（优先5个视频，如果不存在则降级到4个或3个）
         try:
             gt_mp4 = os.path.join(sample_dir, "gt_motion.mp4")
             tf_mp4 = os.path.join(sample_dir, "teacher_forcing_motion.mp4")
             fr_mp4 = os.path.join(sample_dir, "free_running_motion.mp4")
+            fr_label0_mp4 = os.path.join(sample_dir, "free_running_label0_motion.mp4")
             fr_gt_mp4 = os.path.join(sample_dir, "free_running_gt_labels_motion.mp4")
             
-            # 尝试合并4个视频（如果都存在）
+            # 尝试合并5个视频（如果都存在）
             if (os.path.exists(gt_mp4) and os.path.exists(tf_mp4) and 
-                os.path.exists(fr_mp4) and os.path.exists(fr_gt_mp4)):
+                os.path.exists(fr_mp4) and os.path.exists(fr_label0_mp4) and 
+                os.path.exists(fr_gt_mp4)):
+                combined_out = os.path.join(sample_dir, "combined_comparison.mp4")
+                print("\n--- Merging comparison video (GT | TF | FR-Label=0 | FR-GT-Label | FR-Pred-Label) ---")
+                merge_five_videos(
+                    v0=gt_mp4,
+                    v1=tf_mp4,
+                    v2=fr_label0_mp4,
+                    v3=fr_gt_mp4,
+                    v4=fr_mp4,
+                    out_path=combined_out,
+                    layout="hstack",
+                    height=720,
+                    crf=18,
+                    preset="veryfast",
+                    copy_first_audio=True,
+                    label0="GT",
+                    label1="Teacher-Forcing",
+                    label2="FR-Label=0",
+                    label3="FR-GT-Label",
+                    label4="FR-Pred-Label",
+                    fontfile="/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                    fontsize=36,
+                    fontcolor="white",
+                    box=True,
+                    boxcolor="black@0.5",
+                    boxborderw=10,
+                )
+                print(f"✅ Combined comparison video saved: {combined_out}")
+            # 如果只有4个视频，使用4视频合并
+            elif (os.path.exists(gt_mp4) and os.path.exists(tf_mp4) and 
+                  os.path.exists(fr_mp4) and os.path.exists(fr_gt_mp4)):
                 combined_out = os.path.join(sample_dir, "combined_comparison.mp4")
                 print("\n--- Merging comparison video (GT | TF | FR | FR-GT-Label) ---")
                 merge_four_videos(
@@ -1467,6 +2088,8 @@ def main():
                 print("⚠️  Skip merging: one or more input videos are missing.")
         except Exception as e:
             print(f"⚠️  Merge comparison video failed: {e}")
+            import traceback
+            traceback.print_exc()
 
     # 保存评估结果
     results_path = os.path.join(args.output_dir, "evaluation_results.json")

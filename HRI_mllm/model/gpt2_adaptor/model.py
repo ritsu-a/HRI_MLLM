@@ -32,6 +32,7 @@ class MixedInputGPT2(GPT2LMHeadModel):
         self.audio_gesture_end_token_id = getattr(config, 'audio_gesture_end_token_id', None)
         self.gesture_start_token_id = getattr(config, 'gesture_start_token_id', None)
         self.gesture_end_token_id = getattr(config, 'gesture_end_token_id', None)
+        self.motion_blank_token_id = getattr(config, 'motion_blank_token_id', 513)  # 默认值为513（根据special_tokens.py注释）
         
         # 获取audio_tokenizer的vocab_size
         self.audio_vocab_size = self.audio_tokenizer.num_embeddings
@@ -60,6 +61,7 @@ class MixedInputGPT2(GPT2LMHeadModel):
     def forward(self, input_data, attention_mask=None, labels=None,
                 logits_to_keep: Union[int, torch.Tensor] = 0,
                 label_tokens=None,  # 新增：label_tokens用于分类任务
+                use_label_prediction_mode=False,  # 新增：是否使用label预测模式（使用motion_blank）
                  **kwargs):
         """
         input_data: 包含token IDs和hidden states的混合输入
@@ -142,9 +144,12 @@ class MixedInputGPT2(GPT2LMHeadModel):
         # hidden_states = self.transformer.ln_f(hidden_states)
         
         # 通过transformer层
+        # 从kwargs中提取output_attentions，如果没有则默认为False
+        output_attentions = kwargs.pop('output_attentions', False)
         transformer_outputs = self.transformer(
             inputs_embeds=hidden_states,
             attention_mask=attention_mask,
+            output_attentions=output_attentions,
             **kwargs
         )
         
@@ -177,109 +182,169 @@ class MixedInputGPT2(GPT2LMHeadModel):
             motion_mask = ~audio_mask & (attention_mask == 1)
             motion_mask_for_embedding = motion_mask  # 保存用于后续验证
             
+            # 如果使用label预测模式，将motion token替换为motion_blank
+            if use_label_prediction_mode and motion_mask.any():
+                input_data = input_data.clone()
+                input_data[motion_mask] = self.motion_blank_token_id
+            
             if motion_mask.any():
-                # 只对motion token位置计算label_logits（避免对全部位置计算）
-                motion_hidden = hidden_states[motion_mask]  # [num_motion_tokens, hidden_dim]
-                # 保存修改前的motion hidden states，用于后续重新计算（如果需要）
-                motion_hidden_before_modification = motion_hidden.clone()
-                motion_label_logits = self.label_classifier(motion_hidden)  # [num_motion_tokens, 9]
-                
-                # 保存用于后续loss计算
-                motion_label_logits_for_loss = motion_label_logits
-                
-                # Vector Quantization: 将label_logits转换为one-hot向量
-                # 训练时使用straight-through estimator（argmax + detach + one-hot）
-                # 推理时直接使用argmax
-                if self.training:
-                    # 训练时：使用straight-through estimator
-                    # 1. 计算argmax（用于前向传播）
-                    label_indices = torch.argmax(motion_label_logits, dim=-1)  # [num_motion_tokens]
-                    # 2. 创建one-hot向量
-                    motion_label_one_hot = torch.zeros_like(motion_label_logits)
-                    motion_label_one_hot.scatter_(1, label_indices.unsqueeze(1), 1.0)
-                    # 3. 使用straight-through: 前向用one-hot，反向传播用原始logits
-                    motion_label_one_hot = motion_label_one_hot + motion_label_logits - motion_label_logits.detach()
+                # 如果使用label预测模式，计算label_logits（基于motion_blank序列）
+                # 否则，计算label_logits用于添加到下一个audio token（基于真实motion序列）
+                if use_label_prediction_mode:
+                    # label预测模式：使用motion_blank位置的hidden_states计算label_logits
+                    # 注意：即使使用GT label计算loss，我们仍然需要通过label_classifier预测logits
+                    # 因为CrossEntropyLoss需要logits和GT labels
+                    motion_hidden_for_label = hidden_states[motion_mask]  # [num_motion_tokens, hidden_dim]
+                    motion_label_logits = self.label_classifier(motion_hidden_for_label)  # [num_motion_tokens, 9]
+                    motion_label_logits_for_loss = motion_label_logits
+                    motion_hidden_before_modification = motion_hidden_for_label.clone()
                 else:
-                    # 推理时：直接使用argmax + one-hot
-                    label_indices = torch.argmax(motion_label_logits, dim=-1)  # [num_motion_tokens]
-                    motion_label_one_hot = torch.zeros_like(motion_label_logits)
-                    motion_label_one_hot.scatter_(1, label_indices.unsqueeze(1), 1.0)
-                
-                # 将one-hot向量转换为embedding
-                motion_label_embeds = self.label_logit_to_embedding(motion_label_one_hot)  # [num_motion_tokens, hidden_dim]
-                
-                # 使用向量化操作找到每个motion token对应的下一个audio token位置
-                batch_size, seq_len = input_data.shape
-                device = input_data.device
-                
-                # 获取motion token的batch和位置索引
-                motion_batch_indices, motion_pos_indices = torch.where(motion_mask)
-                
-                # 为每个motion token找到下一个audio token位置（向量化）
-                next_audio_positions = torch.full((len(motion_batch_indices),), -1, dtype=torch.long, device=device)
-                
-                # 对每个batch分别处理（避免跨batch的复杂逻辑）
-                for b in range(batch_size):
-                    batch_mask = motion_batch_indices == b
-                    if not batch_mask.any():
-                        continue
+                    # 正常模式：计算label_logits用于添加到下一个audio token（推理时使用）
+                    # 注意：如果模型没有label_classifier（如motion_model），直接跳过
+                    if hasattr(self, 'label_classifier'):
+                        if motion_mask.any():
+                            motion_hidden_for_label = hidden_states[motion_mask]  # [num_motion_tokens, hidden_dim]
+                            # 计算label_logits（用于添加到下一个audio token）
+                            motion_label_logits = self.label_classifier(motion_hidden_for_label)  # [num_motion_tokens, 9]
+                            motion_hidden_before_modification = motion_hidden_for_label.clone()
+                        else:
+                            # 如果没有motion tokens，使用一个dummy输入（取hidden_states的第一个token）
+                            # 这样确保label_classifier的参数在每次forward中都被标记
+                            motion_hidden_for_label = hidden_states[:1]  # [1, hidden_dim]
+                            # 为了DDP静态图兼容性，也"使用"label_classifier，但用detach避免梯度
+                            motion_label_logits_dummy = self.label_classifier(motion_hidden_for_label)
+                            # 立即detach结果并删除，不保留梯度
+                            motion_label_logits_dummy = motion_label_logits_dummy.detach()
+                            del motion_label_logits_dummy
+                            motion_label_logits = None
+                            motion_hidden_before_modification = None
+                    else:
+                        motion_label_logits = None
+                        motion_hidden_before_modification = None
                     
-                    batch_motion_pos = motion_pos_indices[batch_mask]
-                    batch_audio_mask = audio_mask[b]
-                    
-                    # 找到所有audio token位置
-                    audio_positions = torch.where(batch_audio_mask)[0]
-                    
-                    if len(audio_positions) > 0:
-                        # 对每个motion token，找到下一个audio token位置
-                        for i, motion_pos in enumerate(batch_motion_pos):
-                            # 找到第一个大于motion_pos的audio位置
-                            next_audio_mask = audio_positions > motion_pos
-                            if next_audio_mask.any():
-                                next_audio_pos = audio_positions[next_audio_mask][0]
-                                # 找到在motion_batch_indices中的索引
-                                motion_idx = torch.where((motion_batch_indices == b) & (motion_pos_indices == motion_pos))[0]
-                                if len(motion_idx) > 0:
-                                    next_audio_positions[motion_idx[0]] = next_audio_pos
+                    motion_label_logits_for_loss = None  # 正常模式不计算loss
                 
-                # 只处理有效的映射（next_audio_positions != -1）
-                valid_mask = next_audio_positions >= 0
-                if valid_mask.any():
-                    valid_batch = motion_batch_indices[valid_mask]
-                    valid_audio_pos = next_audio_positions[valid_mask]
-                    valid_embeds = motion_label_embeds[valid_mask]
-                    
-                    # 使用scatter_add_进行高效的累积操作（向量化，避免Python循环）
-                    label_embedding_additions = torch.zeros_like(hidden_states)
-                    # 使用index_add_在batch维度上累积
-                    for b in range(batch_size):
-                        batch_mask = valid_batch == b
-                        if batch_mask.any():
-                            batch_audio_pos = valid_audio_pos[batch_mask]
-                            batch_embeds = valid_embeds[batch_mask]
-                            # 对同一batch内的多个audio位置，使用index_add_累积
-                            label_embedding_additions[b].index_add_(
-                                0, batch_audio_pos, batch_embeds
+                # 在label预测模式或正常模式下进行Vector Quantization和embedding添加
+                # 正常模式下也添加label embedding，这样推理时可以使用预测的label影响生成
+                if motion_label_logits is not None:
+                    # Vector Quantization: 将label转换为one-hot向量
+                    # 训练时：如果使用label预测模式，优先使用GT label（如果存在），否则使用推理的label
+                    # 推理时或正常模式：使用推理的label
+                    if use_label_prediction_mode and self.training and label_tokens is not None:
+                        # 训练时：优先使用GT label
+                        # 获取motion token位置对应的GT label
+                        motion_label_tokens_gt = label_tokens[motion_mask]  # [num_motion_tokens]
+                        # 只对有效的GT label（>=0）使用GT，无效的（-1）使用推理结果
+                        valid_gt_mask = motion_label_tokens_gt >= 0
+                        
+                        # 初始化one-hot向量
+                        motion_label_one_hot = torch.zeros_like(motion_label_logits)
+                        
+                        if valid_gt_mask.any():
+                            # 对有效GT label的位置，使用GT label创建one-hot
+                            valid_gt_labels = motion_label_tokens_gt[valid_gt_mask]
+                            motion_label_one_hot[valid_gt_mask].scatter_(1, valid_gt_labels.unsqueeze(1), 1.0)
+                        
+                        # 对无效GT label的位置（-1），使用推理的label（straight-through estimator）
+                        invalid_gt_mask = ~valid_gt_mask
+                        if invalid_gt_mask.any():
+                            label_indices_pred = torch.argmax(motion_label_logits[invalid_gt_mask], dim=-1)
+                            motion_label_one_hot[invalid_gt_mask].scatter_(1, label_indices_pred.unsqueeze(1), 1.0)
+                            # 使用straight-through: 前向用one-hot，反向传播用原始logits
+                            motion_label_one_hot[invalid_gt_mask] = (
+                                motion_label_one_hot[invalid_gt_mask] + 
+                                motion_label_logits[invalid_gt_mask] - 
+                                motion_label_logits[invalid_gt_mask].detach()
                             )
+                    else:
+                        # 推理时或没有GT label时：使用推理的label
+                        label_indices = torch.argmax(motion_label_logits, dim=-1)  # [num_motion_tokens]
+                        motion_label_one_hot = torch.zeros_like(motion_label_logits)
+                        motion_label_one_hot.scatter_(1, label_indices.unsqueeze(1), 1.0)
                     
-                    # 使用非inplace操作添加label embedding
-                    # 注意：这里是在transformer之后添加，只影响最终logits，不影响transformer内部的attention
-                    hidden_states = hidden_states + label_embedding_additions
+                    # 将one-hot向量转换为embedding（用于添加到下一个audio token）
+                    motion_label_embeds = self.label_logit_to_embedding(motion_label_one_hot)  # [num_motion_tokens, hidden_dim]
+                    
+                    # 使用向量化操作找到每个motion token对应的下一个audio token位置
+                    batch_size, seq_len = input_data.shape
+                    device = input_data.device
+                    
+                    # 获取motion token的batch和位置索引
+                    motion_batch_indices, motion_pos_indices = torch.where(motion_mask)
+                    
+                    # 为每个motion token找到下一个audio token位置（向量化）
+                    next_audio_positions = torch.full((len(motion_batch_indices),), -1, dtype=torch.long, device=device)
+                    
+                    # 对每个batch分别处理（避免跨batch的复杂逻辑）
+                    for b in range(batch_size):
+                        batch_mask = motion_batch_indices == b
+                        if not batch_mask.any():
+                            continue
+                        
+                        batch_motion_pos = motion_pos_indices[batch_mask]
+                        batch_audio_mask = audio_mask[b]
+                        
+                        # 找到所有audio token位置
+                        audio_positions = torch.where(batch_audio_mask)[0]
+                        
+                        if len(audio_positions) > 0:
+                            # 对每个motion token，找到下一个audio token位置
+                            for i, motion_pos in enumerate(batch_motion_pos):
+                                # 找到第一个大于motion_pos的audio位置
+                                next_audio_mask = audio_positions > motion_pos
+                                if next_audio_mask.any():
+                                    next_audio_pos = audio_positions[next_audio_mask][0]
+                                    # 找到在motion_batch_indices中的索引
+                                    motion_idx = torch.where((motion_batch_indices == b) & (motion_pos_indices == motion_pos))[0]
+                                    if len(motion_idx) > 0:
+                                        next_audio_positions[motion_idx[0]] = next_audio_pos
+                    
+                    # 只处理有效的映射（next_audio_positions != -1）
+                    valid_mask = next_audio_positions >= 0
+                    if valid_mask.any():
+                        valid_batch = motion_batch_indices[valid_mask]
+                        valid_audio_pos = next_audio_positions[valid_mask]
+                        valid_embeds = motion_label_embeds[valid_mask]
+                        
+                        # 使用scatter_add_进行高效的累积操作（向量化，避免Python循环）
+                        label_embedding_additions = torch.zeros_like(hidden_states)
+                        # 使用index_add_在batch维度上累积
+                        for b in range(batch_size):
+                            batch_mask = valid_batch == b
+                            if batch_mask.any():
+                                batch_audio_pos = valid_audio_pos[batch_mask]
+                                batch_embeds = valid_embeds[batch_mask]
+                                # 对同一batch内的多个audio位置，使用index_add_累积
+                                label_embedding_additions[b].index_add_(
+                                    0, batch_audio_pos, batch_embeds
+                                )
+                        
+                        # 使用非inplace操作添加label embedding
+                        # 注意：这里是在transformer之后添加，只影响最终logits，不影响transformer内部的attention
+                        hidden_states = hidden_states + label_embedding_additions
+                else:
+                    # 非label预测模式：不添加label embedding
+                    label_embedding_additions = None
         
         # 在修改hidden_states后计算logits（这样logits能反映label embedding的影响）
-        logits = self.lm_head(hidden_states[:, slice_indices, :])
+        # 如果使用label预测模式，不计算motion logits（只计算label_logits）以节省显存
+        if use_label_prediction_mode:
+            logits = None  # label预测模式不计算motion logits，节省显存
+        else:
+            logits = self.lm_head(hidden_states[:, slice_indices, :])
 
         loss = None
         label_loss = None
         
-        if labels is not None:
-            # Flatten the tokens
-            loss = self.loss_function(
-                logits,
-                labels,
-                vocab_size=self.config.vocab_size,
-                **kwargs,
-            )
+        if labels is not None and not use_label_prediction_mode:
+            # 只在非label预测模式下计算motion loss
+            if logits is not None:
+                loss = self.loss_function(
+                    logits,
+                    labels,
+                    vocab_size=self.config.vocab_size,
+                    **kwargs,
+                )
 
         # 计算分类loss（只在motion token位置计算）
         label_logits = None
@@ -290,27 +355,19 @@ class MixedInputGPT2(GPT2LMHeadModel):
         
         # 注意：debug_label_loss已在前面定义，这里不需要重新定义
         
-        if label_tokens is not None and labels is not None and attention_mask is not None:
+        # 只在label预测模式下计算label_loss
+        # 注意：在训练时，我们需要通过label_classifier预测label_logits来计算loss
+        # 但在label预测模式下，我们仍然需要label_classifier来预测，因为CrossEntropyLoss需要logits
+        if use_label_prediction_mode and label_tokens is not None and labels is not None and attention_mask is not None:
             # 重新计算motion_mask，确保与前面一致
             # 注意：必须使用与前面相同的计算方式
             audio_mask_loss = (labels == -100) & (attention_mask == 1)
             motion_mask_loss = ~audio_mask_loss & (attention_mask == 1)
             
-            if motion_mask_loss.any():
-                # 如果已经计算过motion_label_logits，直接使用；否则现在计算
-                if motion_label_logits_for_loss is not None:
-                    # 验证motion_mask是否匹配
-                    expected_num_motion = motion_mask_loss.sum().item()
-                    actual_num_logits = motion_label_logits_for_loss.shape[0]
-                    if expected_num_motion == actual_num_logits:
-                        motion_label_logits = motion_label_logits_for_loss
-                    else:
-                        # 如果不匹配，重新计算
-                        motion_hidden = hidden_states[motion_mask_loss]
-                        motion_label_logits = self.label_classifier(motion_hidden)
-                else:
-                    motion_hidden = hidden_states[motion_mask_loss]
-                    motion_label_logits = self.label_classifier(motion_hidden)
+            if motion_mask_loss.any() and motion_label_logits_for_loss is not None:
+                # 使用已经计算好的motion_label_logits（基于motion_blank序列）
+                # 注意：即使使用GT label，我们仍然需要通过label_classifier预测logits来计算loss
+                motion_label_logits = motion_label_logits_for_loss
                 
                 motion_label_tokens = label_tokens[motion_mask_loss]
                 
@@ -320,6 +377,7 @@ class MixedInputGPT2(GPT2LMHeadModel):
                 
                 if num_valid_labels > 0:
                     # 计算分类loss（CrossEntropyLoss）
+                    # 注意：即使使用GT label，我们仍然需要logits来计算CrossEntropyLoss
                     # 忽略label=-1的位置（padding、audio token、特殊token或BEAT数据，没有label）
                     label_loss_fct = nn.CrossEntropyLoss(ignore_index=-1, reduction='mean')
                     # 确保输入形状正确
@@ -350,79 +408,44 @@ class MixedInputGPT2(GPT2LMHeadModel):
                     self._last_label_accuracy = None
         
         # 创建完整的label_logits用于输出（只motion位置有值）
-        # 注意：即使label_tokens=None（推理时），也应该计算并返回label_logits
+        # 注意：只在label预测模式下创建label_logits，避免在正常模式下使用label_classifier
         if label_logits is None:
-            # 确定使用哪个motion_mask和motion_label_logits
-            # 优先使用motion_mask_loss（训练时），否则使用motion_mask（推理时）
-            if 'motion_mask_loss' in locals() and motion_mask_loss is not None:
-                final_motion_mask = motion_mask_loss
-                final_motion_label_logits = motion_label_logits if 'motion_label_logits' in locals() and motion_label_logits is not None else None
-            elif 'motion_mask' in locals() and motion_mask is not None:
-                final_motion_mask = motion_mask
-                # 如果motion_label_logits_for_loss存在（在推理时已计算），使用它
-                final_motion_label_logits = motion_label_logits_for_loss if motion_label_logits_for_loss is not None else None
-            else:
-                final_motion_mask = None
-                final_motion_label_logits = None
-            
-            # 填充label_logits
-            if final_motion_mask is not None and final_motion_mask.any() and final_motion_label_logits is not None:
-                # 验证mask和logits的匹配
-                expected_num = final_motion_mask.sum().item()
-                actual_num = final_motion_label_logits.shape[0]
-                if expected_num != actual_num:
-                    # 如果数量不匹配，使用保存的修改前的motion hidden states重新计算
-                    # 注意：不能使用修改后的hidden_states，因为已经添加了label embedding
-                    if motion_hidden_before_modification is not None:
-                        # 如果mask匹配，直接使用保存的hidden states
-                        if motion_hidden_before_modification.shape[0] == expected_num:
-                            final_motion_label_logits = self.label_classifier(motion_hidden_before_modification)
-                        else:
-                            # 如果mask不匹配，需要重新从原始hidden_states提取（但此时hidden_states已被修改）
-                            # 这种情况下，我们应该使用已计算的motion_label_logits_for_loss
-                            # 如果motion_label_logits_for_loss存在且数量匹配，使用它
-                            if motion_label_logits_for_loss is not None and motion_label_logits_for_loss.shape[0] == expected_num:
-                                final_motion_label_logits = motion_label_logits_for_loss
-                            else:
-                                # 如果都不匹配，将final_motion_label_logits设置为None，让代码进入else分支创建全零label_logits
-                                final_motion_label_logits = None
-                    else:
-                        # 如果没有保存的motion_hidden，尝试使用motion_label_logits_for_loss
-                        if motion_label_logits_for_loss is not None and motion_label_logits_for_loss.shape[0] == expected_num:
-                            final_motion_label_logits = motion_label_logits_for_loss
-                        else:
-                            final_motion_label_logits = None
-                
-                # 再次检查final_motion_label_logits是否为None（可能在上述逻辑中被设置为None）
-                if final_motion_label_logits is not None:
+            if use_label_prediction_mode and motion_label_logits_for_loss is not None:
+                # label预测模式：使用已计算的label_logits
+                if motion_mask is not None and motion_mask.any():
                     label_logits = torch.zeros(
                         hidden_states.shape[0], hidden_states.shape[1], 9,
-                        device=hidden_states.device, dtype=final_motion_label_logits.dtype
+                        device=hidden_states.device, dtype=motion_label_logits_for_loss.dtype
                     )
-                    label_logits[final_motion_mask] = final_motion_label_logits
+                    label_logits[motion_mask] = motion_label_logits_for_loss
                 else:
-                    # 如果final_motion_label_logits为None，创建全零的label_logits
                     label_logits = torch.zeros(
                         hidden_states.shape[0], hidden_states.shape[1], 9,
                         device=hidden_states.device, dtype=hidden_states.dtype
                     )
-            elif hidden_states is not None:
-                # 如果没有motion_label_logits，创建一个全零的label_logits
-                label_logits = torch.zeros(
-                    hidden_states.shape[0], hidden_states.shape[1], 9,
-                    device=hidden_states.device, dtype=hidden_states.dtype
-                )
             else:
-                label_logits = None
+                # 非label预测模式：创建全零的label_logits（不计算，避免使用label_classifier）
+                if hidden_states is not None:
+                    label_logits = torch.zeros(
+                        hidden_states.shape[0], hidden_states.shape[1], 9,
+                        device=hidden_states.device, dtype=hidden_states.dtype
+                    )
+                else:
+                    label_logits = None
 
         # 将label_logits和label_loss存储为额外属性
+        # 确保attentions被正确传递
+        attentions = None
+        if hasattr(transformer_outputs, 'attentions'):
+            attentions = transformer_outputs.attentions
+        
         output = CausalLMOutputWithCrossAttentions(
             loss=loss,
             logits=logits,
-            past_key_values=transformer_outputs.past_key_values,
-            hidden_states=transformer_outputs.hidden_states,
-            attentions=transformer_outputs.attentions,
-            cross_attentions=transformer_outputs.cross_attentions,
+            past_key_values=transformer_outputs.past_key_values if hasattr(transformer_outputs, 'past_key_values') else None,
+            hidden_states=transformer_outputs.hidden_states if hasattr(transformer_outputs, 'hidden_states') else None,
+            attentions=attentions,
+            cross_attentions=transformer_outputs.cross_attentions if hasattr(transformer_outputs, 'cross_attentions') else None,
         )
         # 添加额外的属性（确保label_loss是tensor或None）
         output.label_logits = label_logits

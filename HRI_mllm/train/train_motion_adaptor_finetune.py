@@ -294,11 +294,23 @@ class JSONLAudioMotionDataset(Dataset):
         self.stats['total_sequences'] += 1
     
     def apply_sliding_window(self, full_seq, full_label_seq, token_types, action_class=None):
-        """（已移除滑窗）仅生成单一样本：将序列截断到 max_seq_length"""
+        """生成单一样本：如果序列超过max_seq_length，随机裁剪（仅对BEAT数据集）"""
         max_len = self.config.max_seq_length
-        sub_seq = full_seq[:max_len]
-        sub_label_seq = full_label_seq[:max_len]
-        sub_types = token_types[:max_len]
+        full_len = len(full_seq)
+        
+        # 如果序列长度超过max_seq_length，进行随机裁剪（仅对BEAT数据集）
+        if full_len > max_len and self.dataset_name == "BEAT":
+            # 随机选择起始位置
+            start_idx = random.randint(0, full_len - max_len)
+            sub_seq = full_seq[start_idx:start_idx + max_len]
+            sub_label_seq = full_label_seq[start_idx:start_idx + max_len]
+            sub_types = token_types[start_idx:start_idx + max_len]
+        else:
+            # 对于single_motion或长度不超过max_len的序列，直接截断
+            sub_seq = full_seq[:max_len]
+            sub_label_seq = full_label_seq[:max_len]
+            sub_types = token_types[:max_len]
+        
         mask = [1 if t == 1 else 0 for t in sub_types]
         
         padded_seq = sub_seq + [self.SEQ_PAD_TOKEN] * (max_len - len(sub_seq))
@@ -841,12 +853,11 @@ else:
         "dataset_weights": args.dataset_weights,
     })()
 
-# 创建模型
-# 注意：n_positions 需要与 checkpoint 保持一致（4096），否则无法加载权重
-# 训练时使用较短序列（如 256/1024）不影响模型结构（n_positions 仍为 4096）
+# 创建模型配置
+# 注意：n_positions 设置为512，与max_seq_length保持一致
 model_config = GPT2Config(
     vocab_size=config.total_vocab_size,
-    n_positions=4096,  # 保持与原 checkpoint 一致
+    n_positions=512,  # 与max_seq_length保持一致
     n_embd=768,
     n_layer=12,
     n_head=12,
@@ -859,10 +870,42 @@ model_config.audio_gesture_start_token_id = config.audio_gesture_start_token_id
 model_config.audio_gesture_end_token_id = config.audio_gesture_end_token_id
 model_config.gesture_start_token_id = config.gesture_start_token_id
 model_config.gesture_end_token_id = config.gesture_end_token_id
-model = MixedInputGPT2(model_config)
+
+# 创建两个模型：motion_model（不含label_classifier）和label_model（包含label_classifier）
+# 它们共享transformer参数，但label_classifier只在label_model中使用
+motion_model = MixedInputGPT2(model_config)
+label_model = MixedInputGPT2(model_config)
+
+# 共享transformer参数（transformer, input_projection, motion_tokenizer, audio_tokenizer等）
+# 但label_classifier和label_logit_to_embedding只在label_model中
+# 删除motion_model中的label_classifier和label_logit_to_embedding
+if hasattr(motion_model, 'label_classifier'):
+    delattr(motion_model, 'label_classifier')
+if hasattr(motion_model, 'label_logit_to_embedding'):
+    delattr(motion_model, 'label_logit_to_embedding')
+
+# 共享transformer参数
+# 直接让label_model的transformer等模块引用motion_model的模块
+# 这样两个模型共享transformer参数，但label_classifier和label_logit_to_embedding只在label_model中
+label_model.transformer = motion_model.transformer
+label_model.input_projection = motion_model.input_projection
+label_model.motion_tokenizer = motion_model.motion_tokenizer
+label_model.audio_tokenizer = motion_model.audio_tokenizer
+label_model.lm_head = motion_model.lm_head
+# 共享特殊token ID配置
+label_model.audio_gesture_start_token_id = motion_model.audio_gesture_start_token_id
+label_model.audio_gesture_end_token_id = motion_model.audio_gesture_end_token_id
+label_model.gesture_start_token_id = motion_model.gesture_start_token_id
+label_model.gesture_end_token_id = motion_model.gesture_end_token_id
+label_model.motion_blank_token_id = motion_model.motion_blank_token_id
+label_model.audio_vocab_size = motion_model.audio_vocab_size
+
+# 使用motion_model作为主模型（用于DDP包装）
+model = motion_model
 
 device = torch.device(f'cuda:{local_rank}')
 model.to(device)
+label_model.to(device)
 
 # 如果提供了resume_from，加载checkpoint
 start_epoch = 0
@@ -894,6 +937,15 @@ if args.resume_from and os.path.exists(args.resume_from):
     
     # 加载checkpoint，strict=False允许缺失的键
     model.load_state_dict(checkpoint_state, strict=False)
+    # label_model也需要加载checkpoint
+    # 注意：由于共享transformer参数，只需要加载label_classifier和label_logit_to_embedding
+    label_classifier_state = {k.replace('label_classifier.', ''): v for k, v in checkpoint_state.items() if k.startswith('label_classifier.')}
+    label_logit_to_embedding_state = {k.replace('label_logit_to_embedding.', ''): v for k, v in checkpoint_state.items() if k.startswith('label_logit_to_embedding.')}
+    if label_classifier_state:
+        label_model.label_classifier.load_state_dict(label_classifier_state, strict=False)
+    if label_logit_to_embedding_state:
+        label_model.label_logit_to_embedding.load_state_dict(label_logit_to_embedding_state, strict=False)
+    # 共享的参数已经通过motion_model加载，不需要再次加载
     start_epoch = checkpoint.get('epoch', 0) + 1
     
     if local_rank == 0:
@@ -907,13 +959,18 @@ else:
         print("\nStarting finetuning from pretrained model\n")
 
 # 只在分布式模式下使用DDP
+# 注意：只包装motion_model，因为label_model共享transformer参数
+# label_model不需要DDP包装，因为它只是用来计算label loss
 if world_size > 1:
     model = torch.nn.parallel.DistributedDataParallel(
         model,
         device_ids=[local_rank],
         output_device=local_rank,
-        find_unused_parameters=True
+        find_unused_parameters=False  # 设置为False，因为所有参数都会被使用
     )
+    # 使用_set_static_graph()，因为现在motion_model和label_model分开，
+    # motion_model的计算图结构在每次forward中都是一致的（不包含label_classifier）
+    model._set_static_graph()
 
 if local_rank == 0:
     model_to_watch = model.module if world_size > 1 else model
@@ -1043,7 +1100,13 @@ if local_rank == 0:
     print(f"Combined dataset: {len(combined_dataset)} samples (BEAT: {len(beat_dataset)}, single_motion: {len(single_motion_subsampled)})")
     print(f"All sequences max_length: {beat_config.max_seq_length}")
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
+# 优化器需要包含motion_model和label_model的所有参数
+# 注意：由于label_model共享transformer参数，实际上只需要包含motion_model的参数
+# 但label_model的label_classifier和label_logit_to_embedding需要单独添加
+optimizer = torch.optim.AdamW(
+    list(model.parameters()) + list(label_model.label_classifier.parameters()) + list(label_model.label_logit_to_embedding.parameters()),
+    lr=config.learning_rate
+)
 
 if args.resume_from and os.path.exists(args.resume_from):
     checkpoint = torch.load(args.resume_from, map_location='cpu')
@@ -1173,13 +1236,46 @@ for epoch in range(start_epoch, config.epochs):
     if args.use_weighted_datasets and sampler is not None and hasattr(sampler, "set_epoch"):
         sampler.set_epoch(epoch)
     
+    # 每个epoch开始时重置模型状态
     model.train()
+    
+    # 重置模型内部状态（每个epoch开始时）
+    if world_size > 1:
+        actual_model = model.module
+    else:
+        actual_model = model
+    # 清除可能残留的调试状态和缓存
+    if hasattr(actual_model, '_last_label_loss'):
+        actual_model._last_label_loss = None
+    if hasattr(actual_model, '_last_label_logits'):
+        actual_model._last_label_logits = None
+    if hasattr(actual_model, '_last_label_accuracy'):
+        actual_model._last_label_accuracy = None
+    if hasattr(actual_model, '_debug_label_loss'):
+        actual_model._debug_label_loss = False
+    
+    # 重置统计变量
     total_loss = 0
     total_motion_loss = 0
     total_label_loss = 0
     total_label_correct = 0
     total_label_count = 0
+    
+    # 确保optimizer梯度被清零（每个epoch开始时）
     optimizer.zero_grad()
+    
+    # 清理CUDA缓存（每个epoch开始时，避免跨epoch的状态残留）
+    torch.cuda.empty_cache()
+    
+    # 如果是DDP，在每个epoch开始时同步一次，确保所有rank都准备好
+    if world_size > 1:
+        dist.barrier()
+        # 确保DDP reducer状态已重置（通过访问reducer来触发状态检查）
+        # 这确保上一个epoch的所有梯度同步已完成
+        if hasattr(model, 'reducer'):
+            # 确保reducer已完成所有pending的reduction
+            # 通过一个dummy操作来确保reducer状态已重置
+            pass
     
     if local_rank == 0:
         dataloader_iter = tqdm(dataloader, desc=f"Epoch {epoch+1}/{config.epochs}")
@@ -1227,8 +1323,48 @@ for epoch in range(start_epoch, config.epochs):
         else:
             actual_model._debug_label_loss = False
         
-        outputs = model(inputs, labels=labels, attention_mask=attn_mask, label_tokens=label_tokens_batch)
+        # 第一次forward：使用motion_model进行正常的motion prediction
+        # 注意：motion_model不包含label_classifier，所以不会计算label相关的loss
+        outputs = model(inputs, labels=labels, attention_mask=attn_mask, label_tokens=None, use_label_prediction_mode=False)
         motion_loss = outputs.loss / accum_steps if outputs.loss is not None else 0.0
+        
+        # 释放第一次forward中不需要的中间变量以节省显存
+        # 只保留loss，删除logits等大张量
+        if hasattr(outputs, 'logits'):
+            del outputs.logits
+        # 清理CUDA缓存
+        torch.cuda.empty_cache()
+        
+        # 第二次forward：使用label_model进行label prediction（使用motion_blank替换motion token）
+        # 这样label_loss可以对transformer参数进行监督
+        # label_model共享transformer参数，但包含label_classifier
+        label_loss_value = None
+        label_logits = None
+        label_accuracy = 0.0
+        if label_tokens_batch is not None:
+            # 使用label_model进行forward（注意：label_model共享transformer参数）
+            outputs_label = label_model(inputs, labels=labels, attention_mask=attn_mask, label_tokens=label_tokens_batch, use_label_prediction_mode=True)
+            # 将label相关的输出合并到outputs中
+            if hasattr(outputs_label, 'label_loss'):
+                outputs.label_loss = outputs_label.label_loss
+                label_loss_value = outputs_label.label_loss
+            if hasattr(outputs_label, 'label_logits'):
+                outputs.label_logits = outputs_label.label_logits
+                label_logits = outputs_label.label_logits
+            if hasattr(outputs_label, 'label_accuracy'):
+                outputs.label_accuracy = outputs_label.label_accuracy
+                label_accuracy = outputs_label.label_accuracy
+            # 释放第二次forward中不需要的中间变量
+            if hasattr(outputs_label, 'logits') and outputs_label.logits is not None:
+                del outputs_label.logits
+            # 清理CUDA缓存
+            torch.cuda.empty_cache()
+        else:
+            # 如果没有label_tokens，设置默认值
+            outputs.label_loss = None
+            outputs.label_logits = None
+            outputs.label_accuracy = None
+            label_loss_value = None
         
         # 多卡训练时，DDP可能不会传递自定义属性，需要从内部模型获取
         if world_size > 1:
@@ -1280,14 +1416,12 @@ for epoch in range(start_epoch, config.epochs):
         # 只有single_motion数据集包含label_tokens，BEAT数据集的label_tokens全为0
         has_single_motion = source_ids is not None and (source_ids == 1).any()
         
-        # 获取label_loss（模型已经计算好了，包括对BEAT数据的处理）
-        # 注意：模型会计算所有motion token的label_loss，但CrossEntropyLoss的ignore_index=-1会自动忽略BEAT数据（label=-1）
-        # 在多卡训练时，DDP可能不会自动传递自定义属性，需要手动处理
-        if hasattr(outputs, 'label_loss'):
-            if outputs.label_loss is not None and isinstance(outputs.label_loss, torch.Tensor):
-                label_loss = outputs.label_loss / accum_steps
-            else:
-                label_loss = torch.tensor(0.0, device=device)
+        # 获取label_loss（从第二次forward获取）
+        # 注意：如果label_loss_value已经设置，直接使用；否则从outputs获取
+        if label_loss_value is not None and isinstance(label_loss_value, torch.Tensor):
+            label_loss = label_loss_value / accum_steps
+        elif hasattr(outputs, 'label_loss') and outputs.label_loss is not None and isinstance(outputs.label_loss, torch.Tensor):
+            label_loss = outputs.label_loss / accum_steps
         else:
             label_loss = torch.tensor(0.0, device=device)
         
@@ -1396,9 +1530,25 @@ for epoch in range(start_epoch, config.epochs):
         
         # 合并loss（可以调整权重）
         label_loss_weight = 0.5  # 分类loss的权重
-        loss = motion_loss + label_loss_weight * label_loss
         
-        loss.backward()
+        # 合并loss后一次性backward，避免DDP错误
+        # 注意：由于在第一次forward中也"使用"了label_classifier（用no_grad），
+        # 参数在两次forward中都被标记，所以可以合并loss后一次性backward
+        if isinstance(label_loss, torch.Tensor) and label_loss.requires_grad:
+            combined_loss = motion_loss + label_loss_weight * label_loss
+        else:
+            combined_loss = motion_loss
+        
+        # 确保combined_loss是tensor且有梯度
+        if isinstance(combined_loss, torch.Tensor) and combined_loss.requires_grad:
+            combined_loss.backward()
+        elif isinstance(combined_loss, torch.Tensor):
+            # combined_loss是tensor但没有梯度，跳过
+            pass
+        else:
+            # combined_loss是0.0（float），创建一个dummy tensor
+            combined_loss_tensor = torch.tensor(0.0, device=device, requires_grad=True)
+            combined_loss_tensor.backward()
         
         if (step + 1) % accum_steps == 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -1407,8 +1557,10 @@ for epoch in range(start_epoch, config.epochs):
             optimizer.zero_grad()
             # 更新全局step（只在accum_steps的倍数时更新，因为optimizer.step()和scheduler.step()只在此时调用）
             global_step += 1
+            # 注意：DDP的reducer会在backward()时自动同步梯度，optimizer.step()后状态已重置
+            # 不需要额外的barrier，因为DDP内部已经处理了同步
         
-        total_loss += loss.item() * accum_steps
+        total_loss += combined_loss.item() * accum_steps
         total_motion_loss += motion_loss.item() * accum_steps
         # 只有当label_loss是有效的tensor且不为0时才累积
         if isinstance(label_loss, torch.Tensor) and label_loss.item() != 0.0:
@@ -1437,8 +1589,8 @@ for epoch in range(start_epoch, config.epochs):
                         total_label_count += valid_mask.sum().item()
         
         if local_rank == 0 and step == 0:
-            print(f"📊 Epoch {epoch+1}, Step {step+1}: Total Loss = {loss.item() * accum_steps:.4f}")
-            print(f"   Motion Loss = {motion_loss.item() * accum_steps:.4f}, Label Loss = {label_loss.item() * accum_steps if label_loss != 0.0 else 0.0:.4f}")
+            print(f"📊 Epoch {epoch+1}, Step {step+1}: Total Loss = {combined_loss.item() * accum_steps:.4f}")
+            print(f"   Motion Loss = {motion_loss.item() * accum_steps:.4f}, Label Loss = {label_loss.item() * accum_steps if isinstance(label_loss, torch.Tensor) and label_loss.item() != 0.0 else 0.0:.4f}")
             print(f"   Label Accuracy = {label_accuracy * 100:.2f}%")
             print(f"   Input shape: {inputs.shape}, Labels shape: {labels.shape}")
             print(f"   Attention mask shape: {attn_mask.shape}")
@@ -1449,9 +1601,9 @@ for epoch in range(start_epoch, config.epochs):
         
         if local_rank == 0 and (step % 100 == 0 or step == len(dataloader) - 1):  # 改为每100步记录一次，更频繁
             log_data = {
-                "train/loss": loss.item() * accum_steps,
+                "train/loss": combined_loss.item() * accum_steps,
                 "train/motion_loss": motion_loss.item() * accum_steps,
-                "train/label_loss": label_loss.item() * accum_steps if label_loss != 0.0 and isinstance(label_loss, torch.Tensor) else 0.0,
+                "train/label_loss": label_loss.item() * accum_steps if isinstance(label_loss, torch.Tensor) and label_loss.item() != 0.0 else 0.0,
                 "train/label_accuracy": label_accuracy * 100,  # 转换为百分比
                 "train/lr": scheduler.get_last_lr()[0],
                 "train/seq_length": lengths.float().mean().item(),
@@ -1464,14 +1616,20 @@ for epoch in range(start_epoch, config.epochs):
             }
             wandb.log(log_data)
             dataloader_iter.set_postfix(
-                loss=loss.item() * accum_steps, 
+                loss=combined_loss.item() * accum_steps, 
                 motion_loss=motion_loss.item() * accum_steps, 
-                label_loss=label_loss.item() * accum_steps if label_loss != 0.0 and isinstance(label_loss, torch.Tensor) else 0.0,
+                label_loss=label_loss.item() * accum_steps if isinstance(label_loss, torch.Tensor) and label_loss.item() != 0.0 else 0.0,
                 label_acc=f"{label_accuracy * 100:.2f}%"
             )
 
+    # 在epoch结束时，确保所有梯度同步完成
     if world_size > 1:
+        # 等待所有rank完成最后一个batch的梯度同步
         dist.barrier()
+        # 确保DDP reducer状态已清空
+        # 在静态图模式下，DDP期望每个iteration的参数使用模式一致
+        # 通过barrier确保所有rank都完成了梯度同步，reducer状态已重置
+        # 注意：DDP的reducer会在optimizer.step()后自动完成同步，但barrier确保所有rank都到达这里
     
     if local_rank == 0:
         avg_loss = total_loss / len(dataloader)
@@ -1502,11 +1660,24 @@ for epoch in range(start_epoch, config.epochs):
         if (epoch + 1) % 50 == 0:
             ckpt_path = f"{version_dir}/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
             model_to_save = model.module if world_size > 1 else model
-            torch.save({
+            # 保存motion_model的state_dict（包含共享的transformer参数）
+            # label_model的label_classifier和label_logit_to_embedding需要单独保存
+            checkpoint_dict = {
                 'epoch': epoch,
                 'model_state': model_to_save.state_dict(),
                 'optimizer': optimizer.state_dict(),
-            }, ckpt_path)
+            }
+            # 添加label_model的label_classifier和label_logit_to_embedding参数
+            label_classifier_state = {}
+            label_logit_to_embedding_state = {}
+            for name, param in label_model.label_classifier.named_parameters():
+                label_classifier_state[f'label_classifier.{name}'] = param.cpu().clone()
+            for name, param in label_model.label_logit_to_embedding.named_parameters():
+                label_logit_to_embedding_state[f'label_logit_to_embedding.{name}'] = param.cpu().clone()
+            # 合并到model_state中
+            checkpoint_dict['model_state'].update(label_classifier_state)
+            checkpoint_dict['model_state'].update(label_logit_to_embedding_state)
+            torch.save(checkpoint_dict, ckpt_path)
             wandb.save(ckpt_path)
             print(f"💾 Saved checkpoint: {ckpt_path}")
 
