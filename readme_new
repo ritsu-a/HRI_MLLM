@@ -67,14 +67,52 @@ Create single motion JSONL with label tokens:
 
 
 Visualize JSONL motion:
+    # 基础可视化（使用IK优化，默认）
     python HRI_mllm/test/visualize_jsonl_motion.py \
-        --jsonl_path data/single_motion_for_tokenizer_1108_tokens_with_labels.jsonl \
+        --jsonl_path data/single_motion_for_tokenizer_1108_tokens_with_labels_train.jsonl \
         --vqvae_config g1_vqvae_arbitrary_length_balanced.yaml \
         --vqvae_checkpoint output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt \
         --num_samples 5 \
         --output_dir jsonl_visualization \
         --compare_with_gt \
         --dataset_name single_motion_for_tokenizer_1108
+
+    # 对比IK优化效果（生成no IK vs with IK的对比视频）
+    python HRI_mllm/test/visualize_jsonl_motion.py \
+        --jsonl_path data/single_motion_for_tokenizer_1108_tokens_with_labels_train.jsonl \
+        --vqvae_config g1_vqvae_arbitrary_length_balanced.yaml \
+        --vqvae_checkpoint output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt \
+        --num_samples 5 \
+        --output_dir jsonl_visualization \
+        --compare_with_gt \
+        --compare_ik \
+        --dataset_name single_motion_for_tokenizer_1108
+
+    # 不使用IK优化（仅用于对比，注意：GT始终不使用IK）
+    python HRI_mllm/test/visualize_jsonl_motion.py \
+        --jsonl_path data/single_motion_for_tokenizer_1108_tokens_with_labels_train.jsonl \
+        --vqvae_config g1_vqvae_arbitrary_length_balanced.yaml \
+        --vqvae_checkpoint output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt \
+        --num_samples 5 \
+        --output_dir jsonl_visualization \
+        --compare_with_gt \
+        --dataset_name single_motion_for_tokenizer_1108 \
+        --no-use_ik
+
+    # 自定义IK参数
+    python HRI_mllm/test/visualize_jsonl_motion.py \
+        --jsonl_path data/single_motion_for_tokenizer_1108_tokens_with_labels_train.jsonl \
+        --vqvae_config g1_vqvae_arbitrary_length_balanced.yaml \
+        --vqvae_checkpoint output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt \
+        --num_samples 5 \
+        --output_dir jsonl_visualization \
+        --compare_with_gt \
+        --compare_ik \
+        --dataset_name single_motion_for_tokenizer_1108 \
+        --ik_iterations 200 \
+        --ik_lr 0.005 \
+        --position_weight 2.0 \
+        --angle_weight 0.05
 
 
 Train Motion Adaptor on BEAT:

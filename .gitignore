@@ -3,6 +3,7 @@ gradio/
 output_disk0
 *.json
 data
+data1
 out.pkl
 out.wav
 output.csv
