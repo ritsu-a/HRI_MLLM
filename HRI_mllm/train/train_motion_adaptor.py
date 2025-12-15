@@ -1,205 +1,15 @@
 import torch
 import torch.distributed as dist
-from torch.utils.data import Dataset, DataLoader, ConcatDataset, Subset
+from torch.utils.data import DataLoader, ConcatDataset, Subset
 from torch.utils.data.distributed import DistributedSampler
 from transformers import GPT2Config, GPT2LMHeadModel
 import numpy as np
 import os
 import wandb
 import math
-import json
 from tqdm import tqdm
-from HRI_mllm.datasets.BEATAudioMotionDataset import BEATAudioMotionDataset
+from HRI_mllm.datasets.jsonl_audio_motion_dataset import JSONLAudioMotionDataset
 from HRI_mllm.model.gpt2_adaptor.model import MixedInputGPT2
-
-class JSONLAudioMotionDataset(Dataset):
-    """从JSONL文件加载音频-动作数据的Dataset"""
-    
-    def __init__(self, jsonl_path, config):
-        self.config = config
-        self.jsonl_path = jsonl_path
-        self.samples = []
-        self.stats = {'total_sequences': 0, 'generated_samples': 0, 'max_length': 0}
-        self.interleave_audios, self.interleave_motions = config.interleave_ratio
-        self.SEQ_PAD_TOKEN = config.pad_token_id
-        
-        print(f"Loading JSONL file: {jsonl_path}")
-        
-        # 读取JSONL文件
-        with open(jsonl_path, 'r', encoding='utf-8') as f:
-            for line_num, line in enumerate(f):
-                try:
-                    data = json.loads(line.strip())
-                    
-                    # 从conversation中提取audio和motion tokens
-                    audio_tokens = None
-                    motion_tokens = None
-                    motion_labels = None
-                    
-                    for msg in data['conversation']:
-                        if msg.get('message_type') == 'audio' and 'audio_tokens' in msg:
-                            audio_tokens = msg['audio_tokens']
-                        elif msg.get('message_type') == 'audio_motion' and 'motion_tokens' in msg:
-                            motion_tokens = msg['motion_tokens']
-                    
-                    # 读取motion_labels（如果存在）
-                    if 'motion_labels' in data:
-                        motion_labels = data['motion_labels']
-                    
-                    if audio_tokens is None or motion_tokens is None:
-                        continue
-                    
-                    # 转换为torch tensor
-                    if not isinstance(audio_tokens, torch.Tensor):
-                        audio_tokens = torch.tensor(audio_tokens)
-                    if not isinstance(motion_tokens, torch.Tensor):
-                        motion_tokens = torch.tensor(motion_tokens)
-                    
-                    # 构建motion_tokens中需要插入特殊token的位置集合
-                    gesture_start_indices = set()
-                    gesture_end_indices = set()
-                    if motion_labels:
-                        for label in motion_labels:
-                            if 'start_token_index' in label:
-                                gesture_start_indices.add(label['start_token_index'])
-                            if 'end_token_index' in label:
-                                gesture_end_indices.add(label['end_token_index'])
-                    
-                    # 构建完整序列（带特殊token）
-                    full_sequence = []
-                    token_types = []
-                    
-                    # 跟踪当前在motion_tokens中的索引
-                    motion_token_idx = 0
-                    
-                    for i in range(len(audio_tokens)):
-                        # 插入audio token
-                        full_sequence.append(audio_tokens[i].item())
-                        token_types.append(0)
-                        
-                        # 根据interleave_ratio插入motion tokens
-                        if (i + 1) % self.interleave_audios == 0:
-                            motion_block_size = self.interleave_motions
-                            for j in range(motion_block_size):
-                                if motion_token_idx < len(motion_tokens):
-                                    # 检查是否是gesture_start
-                                    if motion_token_idx in gesture_start_indices:
-                                        # 先插入gesture_start token
-                                        full_sequence.append(self.config.gesture_start_token_id)
-                                        token_types.append(1)  # motion类型
-                                        # 然后插入audio_gesture_start token
-                                        full_sequence.append(self.config.audio_gesture_start_token_id)
-                                        token_types.append(0)  # audio类型
-                                    
-                                    # 插入motion token
-                                    full_sequence.append(motion_tokens[motion_token_idx].item())
-                                    token_types.append(1)
-                                    
-                                    # 检查是否是gesture_end
-                                    if motion_token_idx in gesture_end_indices:
-                                        # 先插入gesture_end token
-                                        full_sequence.append(self.config.gesture_end_token_id)
-                                        token_types.append(1)  # motion类型
-                                        # 然后插入audio_gesture_end token
-                                        full_sequence.append(self.config.audio_gesture_end_token_id)
-                                        token_types.append(0)  # audio类型
-                                    
-                                    motion_token_idx += 1
-                    
-                    # 处理剩余的motion tokens（如果有的话）
-                    while motion_token_idx < len(motion_tokens):
-                        # 检查是否是gesture_start
-                        if motion_token_idx in gesture_start_indices:
-                            full_sequence.append(self.config.gesture_start_token_id)
-                            token_types.append(1)
-                            full_sequence.append(self.config.audio_gesture_start_token_id)
-                            token_types.append(0)
-                        
-                        # 插入motion token
-                        full_sequence.append(motion_tokens[motion_token_idx].item())
-                        token_types.append(1)
-                        
-                        # 检查是否是gesture_end
-                        if motion_token_idx in gesture_end_indices:
-                            full_sequence.append(self.config.gesture_end_token_id)
-                            token_types.append(1)
-                            full_sequence.append(self.config.audio_gesture_end_token_id)
-                            token_types.append(0)
-                        
-                        motion_token_idx += 1
-                    
-                    # 应用滑动窗口
-                    self.apply_sliding_window(full_sequence, token_types)
-                    self.stats['total_sequences'] += 1
-                    
-                except Exception as e:
-                    print(f"Error processing line {line_num} in {jsonl_path}: {e}")
-                    continue
-        
-        print(f"Loaded {len(self.samples)} samples from {jsonl_path}")
-    
-    def apply_sliding_window(self, full_seq, token_types):
-        seq_len = len(full_seq)
-        
-        if seq_len > self.config.max_seq_length:
-            return
-        
-        sub_seq = full_seq
-        sub_types = token_types
-        
-        mask = [1 if t == 1 else 0 for t in sub_types]
-        
-        padded_seq = sub_seq + [self.SEQ_PAD_TOKEN] * (self.config.max_seq_length - len(sub_seq))
-        padded_mask = mask + [0] * (self.config.max_seq_length - len(mask))
-        
-        self.samples.append({
-            'tokens': torch.tensor(padded_seq),
-            'mask': torch.tensor(padded_mask),
-            'seq_length': len(sub_seq)
-        })
-        
-        self.stats['generated_samples'] += 1
-        self.stats['max_length'] = max(self.stats['max_length'], len(sub_seq))
-    
-    def pool_and_concat_samples(self, sep_token):
-        max_seq = self.config.max_seq_length
-        pad_token = self.SEQ_PAD_TOKEN
-        processed_samples = []
-        cur_seq, cur_mask = [], []
-        for idx, item in enumerate(self.samples):
-            seq = item['tokens'].tolist()
-            mask = item['mask'].tolist()
-            valid_len = item['seq_length']
-            data = seq[:valid_len]
-            mask_data = mask[:valid_len]
-            # 若加本样本+1分隔后超max，先flush已有
-            if cur_seq and len(cur_seq) + 1 + len(data) > max_seq:
-                pad_needed = max_seq - len(cur_seq)
-                padded = cur_seq + [pad_token]*pad_needed
-                padded_mask = cur_mask + [0]*pad_needed
-                processed_samples.append({'tokens': torch.tensor(padded), 'mask': torch.tensor(padded_mask), 'seq_length': len(cur_seq)})
-                cur_seq, cur_mask = [], []
-            # 每个样本段前加分割符
-            if cur_seq:  # 非开头才加
-                cur_seq.append(sep_token)
-                cur_mask.append(0)
-            cur_seq.extend(data)
-            cur_mask.extend(mask_data)
-        # flush最后一批
-        if cur_seq:
-            pad_needed = max_seq - len(cur_seq)
-            padded = cur_seq + [pad_token]*pad_needed
-            padded_mask = cur_mask + [0]*pad_needed
-            processed_samples.append({'tokens': torch.tensor(padded), 'mask': torch.tensor(padded_mask), 'seq_length': len(cur_seq)})
-        self.samples = processed_samples
-    
-    # 删除 pool_and_concat_samples 相关调用，不做预处理拼接
-    
-    def __len__(self):
-        return len(self.samples)
-    
-    def __getitem__(self, idx):
-        return self.samples[idx]
 
 import argparse
 
@@ -209,13 +19,15 @@ parser.add_argument('--resume_from', type=str, default=None,
                    help='Checkpoint path to resume from (e.g., output/motion_adaptor_v2/kimi_audio_motion_gpt2_brainco_30_100/checkpoints/epoch_300.pt)')
 parser.add_argument('--datasets', type=str, nargs='+', default=None,
                    help='Specific datasets to use (e.g., BEAT or internet) - default: all')
+parser.add_argument('--jsonl_files', type=str, nargs='+', default=None,
+                   help='Direct JSONL file paths to use for training')
 parser.add_argument('--epochs', type=int, default=300,
                    help='Number of epochs to train')
 args = parser.parse_args()
 
 exp_name = "kimi_audio_motion_gpt2_brainco_synthetic_en"
-os.makedirs(os.path.join("output/motion_adaptor_v10", exp_name), exist_ok=True)
-os.makedirs(os.path.join("output/motion_adaptor_v10", exp_name, "checkpoints"), exist_ok=True)
+os.makedirs(os.path.join("output_disk0/motion_adaptor_v18", exp_name), exist_ok=True)
+os.makedirs(os.path.join("output_disk0/motion_adaptor_v18", exp_name, "checkpoints"), exist_ok=True)
 
 os.environ["WANDB_MODE"] = "offline"
 
@@ -241,7 +53,10 @@ all_jsonl_files = {
 }
 
 # 根据命令行参数选择数据集
-if args.datasets:
+if args.jsonl_files:
+    # 如果直接指定了jsonl_files，优先使用
+    jsonl_files = args.jsonl_files
+elif args.datasets:
     jsonl_files = [all_jsonl_files[ds] for ds in args.datasets if ds in all_jsonl_files]
     if not jsonl_files:
         if local_rank == 0:
@@ -271,9 +86,9 @@ if local_rank == 0:
             "audio_vocab_size": 16384,
             "motion_vocab_size": 512*2,
             "total_vocab_size": 512*2 + 10,
-            "max_seq_length": 4096,
-            "min_seq_length": 128,
-            "batch_size": 64,
+            "max_seq_length": 256,
+            "min_seq_length": 32,
+            "batch_size": 256,
             "learning_rate": 1e-4,
             "epochs": args.epochs,  # 使用命令行参数
             "sliding_window_step": 32,
@@ -282,6 +97,8 @@ if local_rank == 0:
             "audio_gesture_start_token_id": 512*2 + 3,
             "gesture_end_token_id": 512*2 + 4,
             "audio_gesture_end_token_id": 512*2 + 5,
+            "audio_empty_token_id": 152063,  # glm-voice-4 audio tokenizer的padding token
+            "motion_empty_token_id": 512*2 + 7,
             "interleave_ratio": [1, 1],
             "exp_name": exp_name,
         }
@@ -293,9 +110,9 @@ else:
         "audio_vocab_size": 16384,
         "motion_vocab_size": 512*2,
         "total_vocab_size": 512*2 + 10,
-        "max_seq_length": 4096,
-        "min_seq_length": 128,
-        "batch_size": 64,
+        "max_seq_length": 256,
+        "min_seq_length": 32,
+        "batch_size": 256,
         "learning_rate": 1e-4,
         "epochs": args.epochs,  # 使用命令行参数
         "sliding_window_step": 32,
@@ -304,6 +121,8 @@ else:
         "audio_gesture_start_token_id": 512*2 + 3,
         "gesture_end_token_id": 512*2 + 4,
         "audio_gesture_end_token_id": 512*2 + 5,
+        "audio_empty_token_id": 152063,  # glm-voice-4 audio tokenizer的padding token
+        "motion_empty_token_id": 512*2 + 7,
         "interleave_ratio": [1, 1],
         "exp_name": exp_name,
     })()
@@ -572,7 +391,7 @@ for epoch in range(start_epoch, config.epochs):
         print(f"Epoch {epoch+1}/{config.epochs} | Loss: {avg_loss:.4f}")
         
         if (epoch + 1) % 50 == 0:
-            ckpt_path = f"output/motion_adaptor_v10/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
+            ckpt_path = f"output_disk0/motion_adaptor_v18/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
             # 在DDP模式下使用model.module，否则直接使用model
             model_to_save = model.module if world_size > 1 else model
             torch.save({
@@ -586,7 +405,7 @@ for epoch in range(start_epoch, config.epochs):
 if local_rank == 0:
     # 在DDP模式下使用model.module，否则直接使用model
     model_to_save = model.module if world_size > 1 else model
-    model_to_save.save_pretrained(f"output/motion_adaptor_v10/{config.exp_name}")
+    model_to_save.save_pretrained(f"output_disk0/motion_adaptor_v18/{config.exp_name}")
 
 if world_size > 1:
     dist.destroy_process_group()

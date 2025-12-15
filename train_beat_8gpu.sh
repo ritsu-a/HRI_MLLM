@@ -6,6 +6,8 @@ torchrun \
   --nproc_per_node=8 \
   --master_port=29500 \
   HRI_mllm/train/train_motion_adaptor.py \
-  --datasets BEAT \
+  --jsonl_files /root/workspace/HRI_MLLM/data/single_motion_for_tokenizer_1108_tokens_with_labels_train_other.jsonl \
   --epochs 1000
+
+  # --jsonl_files /root/workspace/HRI_MLLM/data/single_motion_for_tokenizer_1108_tokens_with_labels_train.jsonl \
 
