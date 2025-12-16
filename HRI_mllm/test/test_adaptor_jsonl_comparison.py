@@ -87,7 +87,7 @@ def load_gpt2_from_checkpoint(checkpoint_path, device="cuda"):
     
     model_config = GPT2Config(
         vocab_size=1034,
-        n_positions=256,
+        n_positions=512,
         n_embd=768,
         n_layer=12,
         n_head=12,
@@ -145,10 +145,16 @@ def load_gpt2_from_transformers(model_path, device="cuda"):
 
 def decode_motion_tokens(motion_tokens, motion_vae, mean_t, std_t, expected_frames=None):
     """解码motion tokens为motion features"""
-    special_token_ids = {512*2 + 2, 512*2 + 3, 512*2 + 4, 512*2 + 5}
-    filtered_tokens = [t for t in motion_tokens if t not in special_token_ids]
+    # 过滤所有special token IDs，包括motion_empty_token_id
+    special_token_ids = {512*2 + 2, 512*2 + 3, 512*2 + 4, 512*2 + 5}  # gesture tokens
+    motion_empty_token_id = 512*2 + 7  # motion empty/padding token
+    # 只保留有效的motion tokens: [0, 1023]
+    filtered_tokens = [t for t in motion_tokens 
+                       if t not in special_token_ids 
+                       and t != motion_empty_token_id
+                       and 0 <= int(t) < 1024]  # 确保token在有效范围内
     if len(filtered_tokens) != len(motion_tokens):
-        print(f"⚠️  过滤了 {len(motion_tokens) - len(filtered_tokens)} 个special token")
+        print(f"⚠️  过滤了 {len(motion_tokens) - len(filtered_tokens)} 个special/invalid token")
         motion_tokens = filtered_tokens
     
     if len(motion_tokens) % 2 != 0:
@@ -187,7 +193,7 @@ def decode_motion_tokens(motion_tokens, motion_vae, mean_t, std_t, expected_fram
     return data_dict
 
 
-def generate_motion_tokens_free_running(model, audio_tokens, device="cuda", max_new_tokens=256, 
+def generate_motion_tokens_free_running(model, audio_tokens, device="cuda", max_new_tokens=512, 
                                        temperature=0.8, top_k=50, repetition_penalty=1.1, enable_model_debug=False,
                                        save_attention_weights=False):
     """Free-running模式：完全自回归生成motion tokens
@@ -197,6 +203,9 @@ def generate_motion_tokens_free_running(model, audio_tokens, device="cuda", max_
         attention_weights_list: 第一层attention weights列表（如果save_attention_weights=True）
     """
     model.eval()
+    
+    # 获取模型的最大序列长度（n_positions），应该与训练时的max_seq_length一致
+    max_seq_length = getattr(model.config, 'n_positions', 512)
     
     gesture_start_token_id = getattr(model.config, 'gesture_start_token_id', 512*2 + 2)
     audio_gesture_start_token_id = getattr(model.config, 'audio_gesture_start_token_id', 512*2 + 3)
@@ -219,6 +228,15 @@ def generate_motion_tokens_free_running(model, audio_tokens, device="cuda", max_
     
     # 按照训练时的格式：在audio tokens后面添加10个audio_empty_token
     audio_tokens = audio_tokens + [audio_empty_token_id] * 10
+    
+    # 限制max_new_tokens，确保生成的序列总长度不超过模型的最大长度
+    # 考虑：audio_tokens + padding + generated_motion_tokens <= max_seq_length
+    estimated_audio_length = len(audio_tokens) + 10  # audio tokens + padding
+    max_allowed_motion_tokens = max(1, max_seq_length - estimated_audio_length - 50)  # 留50个token的余量
+    if max_new_tokens > max_allowed_motion_tokens:
+        print(f"⚠️  Warning: max_new_tokens ({max_new_tokens}) exceeds model capacity. "
+              f"Limiting to {max_allowed_motion_tokens} (model max_seq_length={max_seq_length})")
+        max_new_tokens = max_allowed_motion_tokens
     
     generated_motion_tokens = []
     current_seq = []
@@ -252,9 +270,20 @@ def generate_motion_tokens_free_running(model, audio_tokens, device="cuda", max_
                         if len(generated_motion_tokens) >= max_new_tokens:
                             break
                         
+                        # 检查序列长度是否超过模型最大长度
+                        if len(current_seq) >= max_seq_length:
+                            print(f"⚠️  Warning: Sequence length ({len(current_seq)}) reached model max_seq_length ({max_seq_length}). Stopping generation.")
+                            break
+                        
                         inputs = torch.tensor(current_seq).unsqueeze(0).to(device)
-                        attn_mask = torch.ones_like(inputs)
-                        labels = torch.tensor(token_labels).unsqueeze(0).to(device)
+                        # 如果序列长度超过max_seq_length，截断到最大长度
+                        if inputs.shape[1] > max_seq_length:
+                            inputs = inputs[:, -max_seq_length:]
+                            attn_mask = torch.ones_like(inputs)
+                            labels = torch.tensor(token_labels[-max_seq_length:]).unsqueeze(0).to(device)
+                        else:
+                            attn_mask = torch.ones_like(inputs)
+                            labels = torch.tensor(token_labels).unsqueeze(0).to(device)
                         
                         # 注意：在生成过程中不提取attention weights，因为每次只生成一个token
                         # 我们会在生成完成后用完整序列重新forward一次来获取完整的attention matrix
@@ -1040,8 +1069,8 @@ def main():
                        help='Top-k for free-running generation')
     parser.add_argument('--repetition_penalty', type=float, default=1.8,
                        help='Repetition penalty for free-running generation')
-    parser.add_argument('--max_motion_tokens', type=int, default=4096,
-                       help='Maximum motion tokens to generate')
+    parser.add_argument('--max_motion_tokens', type=int, default=512,
+                       help='Maximum motion tokens to generate (should match model max_seq_length=512)')
     parser.add_argument('--random_seed', type=int, default=42,
                        help='Random seed for sampling')
     parser.add_argument('--enable_model_debug', action='store_true',

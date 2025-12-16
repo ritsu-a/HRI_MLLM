@@ -168,7 +168,7 @@ def concat_side_by_side(video_left, video_right, output_path, target_height=720)
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def visualize_motion_from_features(motion_features, output_path, mean, std, device='cuda', use_ik=True, **ik_kwargs):
+def visualize_motion_from_features(motion_features, output_path, mean, std, device='cuda'):
     """从motion features可视化动作"""
     # motion_features应该是未归一化的原始数据
     # 转换为tensor并归一化（feats2datapkl需要归一化的输入）
@@ -179,8 +179,8 @@ def visualize_motion_from_features(motion_features, output_path, mean, std, devi
     # 归一化
     normalized_motion = (motion_tensor - mean_t) / std_t
     
-    # 转换为pkl（使用指定的IK设置）
-    motion_pkl = feats2datapkl(normalized_motion, mean=mean, std=std, use_ik=use_ik, **ik_kwargs)
+    # 转换为pkl（不使用IK优化）
+    motion_pkl = feats2datapkl(normalized_motion, mean=mean, std=std)
     
     # 保存pkl
     pkl_path = output_path.replace('.csv', '.pkl')
@@ -224,20 +224,6 @@ def main():
                        help='Compare with ground truth motion if available')
     parser.add_argument('--dataset_name', type=str, default=None,
                        help='Dataset name for finding original motion files (e.g., BEAT_v2_kimi)')
-    parser.add_argument('--compare_ik', action='store_true',
-                       help='Compare decoded motion with and without IK optimization')
-    parser.add_argument('--use_ik', action='store_true', default=True,
-                       help='Use IK optimization for decoded motion (default: True)')
-    parser.add_argument('--no-use_ik', dest='use_ik', action='store_false',
-                       help='Disable IK optimization for decoded motion')
-    parser.add_argument('--ik_iterations', type=int, default=10,
-                       help='Number of IK optimization iterations (default: 10)')
-    parser.add_argument('--ik_lr', type=float, default=0.01,
-                       help='Learning rate for IK optimization (default: 0.01)')
-    parser.add_argument('--position_weight', type=float, default=1.0,
-                       help='Weight for position loss in IK (default: 1.0)')
-    parser.add_argument('--angle_weight', type=float, default=0.1,
-                       help='Weight for angle regularization in IK (default: 0.1)')
     
     args = parser.parse_args()
     
@@ -348,47 +334,12 @@ def main():
             sample_output_dir = os.path.join(args.output_dir, f"sample_{idx}")
             os.makedirs(sample_output_dir, exist_ok=True)
             
-            # IK参数
-            ik_kwargs = {
-                'ik_iterations': args.ik_iterations,
-                'ik_lr': args.ik_lr,
-                'position_weight': args.position_weight,
-                'angle_weight': args.angle_weight
-            }
-            
-            # 如果启用IK对比，生成两个版本
-            if args.compare_ik:
-                # 生成不使用IK的版本
-                decoded_no_ik_csv_path = os.path.join(sample_output_dir, "decoded_motion_no_ik.csv")
-                decoded_no_ik_video_path = visualize_motion_from_features(
-                    decoded_motion, decoded_no_ik_csv_path, test_mean, test_std, 
-                    args.device, use_ik=False
-                )
-                print(f"✅ Decoded motion (no IK) video: {decoded_no_ik_video_path}")
-                
-                # 生成使用IK的版本
-                decoded_with_ik_csv_path = os.path.join(sample_output_dir, "decoded_motion_with_ik.csv")
-                decoded_with_ik_video_path = visualize_motion_from_features(
-                    decoded_motion, decoded_with_ik_csv_path, test_mean, test_std, 
-                    args.device, use_ik=True, **ik_kwargs
-                )
-                print(f"✅ Decoded motion (with IK) video: {decoded_with_ik_video_path}")
-                
-                # 创建IK对比视频（no IK vs with IK）
-                ik_comparison_video_path = os.path.join(sample_output_dir, "comparison_no_ik_vs_with_ik.mp4")
-                concat_side_by_side(decoded_no_ik_video_path, decoded_with_ik_video_path, ik_comparison_video_path)
-                print(f"✅ IK comparison video: {ik_comparison_video_path}")
-                
-                # 设置默认解码视频为使用IK的版本
-                decoded_video_path = decoded_with_ik_video_path
-            else:
-                # 只生成一个版本（根据use_ik参数）
-                decoded_csv_path = os.path.join(sample_output_dir, "decoded_motion.csv")
-                decoded_video_path = visualize_motion_from_features(
-                    decoded_motion, decoded_csv_path, test_mean, test_std, 
-                    args.device, use_ik=args.use_ik, **ik_kwargs
-                )
-                print(f"✅ Decoded motion video: {decoded_video_path}")
+            # 生成解码后的motion视频
+            decoded_csv_path = os.path.join(sample_output_dir, "decoded_motion.csv")
+            decoded_video_path = visualize_motion_from_features(
+                decoded_motion, decoded_csv_path, test_mean, test_std, args.device
+            )
+            print(f"✅ Decoded motion video: {decoded_video_path}")
             
             # 如果启用GT对比，尝试加载原始motion
             if args.compare_with_gt:
@@ -398,50 +349,17 @@ def main():
                     print(f"Found original motion: {original_motion_path}")
                     original_motion = np.load(original_motion_path)
                     
-                    # 可视化原始motion（GT不使用IK）
+                    # 可视化原始motion（GT）
                     gt_csv_path = os.path.join(sample_output_dir, "ground_truth_motion.csv")
                     gt_video_path = visualize_motion_from_features(
-                        original_motion, gt_csv_path, test_mean, test_std, args.device, use_ik=False
+                        original_motion, gt_csv_path, test_mean, test_std, args.device
                     )
                     print(f"✅ Ground truth motion video: {gt_video_path}")
                     
-                    # 创建对比视频
-                    if args.compare_ik:
-                        # 如果有IK对比，创建三个视频的对比
-                        # GT vs no IK vs with IK
-                        # decoded_no_ik_video_path 和 decoded_with_ik_video_path 已经在上面定义
-                        
-                        # 然后创建最终的三路对比视频：GT vs no IK vs with IK
-                        comparison_video_path = os.path.join(sample_output_dir, "comparison_gt_vs_no_ik_vs_with_ik.mp4")
-                        # 使用ffmpeg创建三路对比（需要两次拼接）
-                        cmd = [
-                            "ffmpeg", "-y",
-                            "-i", gt_video_path,
-                            "-i", decoded_no_ik_video_path,
-                            "-i", decoded_with_ik_video_path,
-                            "-filter_complex",
-                            "[0:v]scale=-2:720,setsar=1[v0];[1:v]scale=-2:720,setsar=1[v1];[2:v]scale=-2:720,setsar=1[v2];[v0][v1][v2]hstack=inputs=3[v]",
-                            "-map", "[v]",
-                            "-map", "0:a?",
-                            "-c:v", "libx264",
-                            "-crf", "18",
-                            "-preset", "veryfast",
-                            "-c:a", "aac",
-                            "-shortest",
-                            comparison_video_path,
-                        ]
-                        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        print(f"✅ Three-way comparison video (GT vs no IK vs with IK): {comparison_video_path}")
-                        
-                        # 也创建GT vs decoded（使用IK）的对比
-                        comparison_gt_vs_decoded_path = os.path.join(sample_output_dir, "comparison_gt_vs_decoded.mp4")
-                        concat_side_by_side(gt_video_path, decoded_with_ik_video_path, comparison_gt_vs_decoded_path)
-                        print(f"✅ GT vs decoded (with IK) comparison video: {comparison_gt_vs_decoded_path}")
-                    else:
-                        # 只有GT vs decoded的对比
-                        comparison_video_path = os.path.join(sample_output_dir, "comparison_gt_vs_decoded.mp4")
-                        concat_side_by_side(gt_video_path, decoded_video_path, comparison_video_path)
-                        print(f"✅ Comparison video: {comparison_video_path}")
+                    # 创建GT vs decoded的对比视频
+                    comparison_video_path = os.path.join(sample_output_dir, "comparison_gt_vs_decoded.mp4")
+                    concat_side_by_side(gt_video_path, decoded_video_path, comparison_video_path)
+                    print(f"✅ Comparison video: {comparison_video_path}")
                 else:
                     print(f"⚠️  Original motion file not found for sample {idx}")
             

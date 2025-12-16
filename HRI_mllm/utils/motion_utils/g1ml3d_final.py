@@ -53,20 +53,18 @@ def feats2joints(features, mean=None, std=None):
     vec = denormalize_vec(features, mean, std)
     return vec_to_joints(vec)
 
-def feats2datapkl(features, mean=None, std=None, use_ik=True, **ik_kwargs):
+def feats2datapkl(features, mean=None, std=None):
     """
     Convert normalized features to data pickle.
     :param features: Normalized features
     :param mean: Mean array (optional, defaults to hparams_mean)
     :param std: Std array (optional, defaults to hparams_std)
-    :param use_ik: Whether to use IK optimization (default: True)
-    :param ik_kwargs: Additional keyword arguments for IK optimization
     """
     assert features.dim() == 3, "Input features must be a 3D tensor (batch_size, frame, num_features)"
     assert features.shape[0] == 1, "Batch size must be 1 for feats2datapkl"
     
     vec = denormalize_vec(features, mean, std)
-    return vec_to_data_pkl(vec.squeeze(0).detach().cpu().numpy(), use_ik=use_ik, **ik_kwargs)
+    return vec_to_data_pkl(vec.squeeze(0).detach().cpu().numpy())
 
 
 def load_normalization_stats(config):

@@ -41,12 +41,12 @@ Create beat JSONL:
     python HRI_mllm/datasets/BEAT_preprocess/generate_motion_tokens.py \
         --vqvae_config g1_vqvae_arbitrary_length_balanced.yaml \
         --vqvae_checkpoint output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt \
-        --data_dirs single_motion_for_tokenizer_1108_joint_vecs \
+        --data_dirs synthetic_data/SG_2_or_3_long_sentence_1030_en_joint_vecs \
         --motion_subdir npy \
         --device cuda \
         --create_jsonl \
         --jsonl_output_dir data \
-        --jsonl_output_name single_motion_for_tokenizer_1108_tokens.jsonl
+        --jsonl_output_name synthetic_data_en_tokens.jsonl
 
 
 Create single motion JSONL with label tokens:
@@ -90,13 +90,13 @@ Visualize JSONL motion:
 
     # 不使用IK优化（仅用于对比，注意：GT始终不使用IK）
     python HRI_mllm/test/visualize_jsonl_motion.py \
-        --jsonl_path data/single_motion_for_tokenizer_1108_tokens_with_labels_train.jsonl \
+        --jsonl_path /root/workspace/HRI_MLLM/data/synthetic_data/SG_2_or_3_long_sentence_1030_en_joint_vecs/synthetic_data_en_tokens_test.jsonl \
         --vqvae_config g1_vqvae_arbitrary_length_balanced.yaml \
         --vqvae_checkpoint output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt \
         --num_samples 5 \
         --output_dir jsonl_visualization \
         --compare_with_gt \
-        --dataset_name single_motion_for_tokenizer_1108 \
+        --dataset_name synthetic_en \
         --no-use_ik
 
     # 自定义IK参数
@@ -126,13 +126,13 @@ Finetune with label loss:
 
 Test Motion Adaptor on BEAT and single motion:
     python HRI_mllm/test/test_adaptor_jsonl_comparison.py \
-    --jsonl_path /root/workspace/HRI_MLLM/data/single_motion_for_tokenizer_1108_tokens_with_labels_train_other.jsonl \
-    --motion_adaptor_path /root/workspace/HRI_MLLM/output_disk0/motion_adaptor_v18/kimi_audio_motion_gpt2_brainco_synthetic_en/checkpoints/epoch_800.pt  \
+    --jsonl_path /root/workspace/HRI_MLLM/data/synthetic_data/SG_2_or_3_long_sentence_1030_en_joint_vecs/synthetic_data_en_tokens_train.jsonl \
+    --motion_adaptor_path /root/workspace/HRI_MLLM/output_disk0/motion_adaptor_v19_synthetic_data_en/kimi_audio_motion_gpt2_brainco_synthetic_en/checkpoints/epoch_1000.pt  \
     --vqvae_config g1_vqvae_arbitrary_length_balanced.yaml \
     --vqvae_checkpoint output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt \
-    --output_dir ./adaptor_comparison_results_1209_large_train_other \
+    --output_dir ./adaptor_comparison_results_1215_synthetic_en_train \
     --num_samples 30 \
-    --temperature 1.0 \
+    --temperature 0.0 \
     --top_k 10 \
     --repetition_penalty 1.0
 

@@ -116,7 +116,8 @@ def _process_batch_same_length(group, num_frames):
     batch_angles_tensor = batch_angles_tensor.detach().requires_grad_(False)
     
     # 重塑为 (batch_size * num_frames, 53) 用于模型处理
-    angles_flat = batch_angles_tensor.view(total_frames, 53)
+    device = getattr(model, "device", torch.device("cpu"))
+    angles_flat = batch_angles_tensor.view(total_frames, 53).to(device)
     model.set_angles(angles_flat)
     
     # 批量计算FK
@@ -203,7 +204,8 @@ def fast_data_pkl_to_vec(data_dict):
     model.eval()
     
     ### set unused dofs to zero
-    angles = torch.from_numpy(angles).float()
+    device = getattr(model, "device", torch.device("cpu"))
+    angles = torch.from_numpy(angles).float().to(device)
     angles[:, :12] *= 0
     
     # 使用 detach() 和 requires_grad=False 来避免梯度计算

@@ -23,11 +23,14 @@ parser.add_argument('--jsonl_files', type=str, nargs='+', default=None,
                    help='Direct JSONL file paths to use for training')
 parser.add_argument('--epochs', type=int, default=300,
                    help='Number of epochs to train')
+parser.add_argument('--version', type=str, default='v18',
+                   help='Model version identifier (e.g., v18, v19)')
 args = parser.parse_args()
 
 exp_name = "kimi_audio_motion_gpt2_brainco_synthetic_en"
-os.makedirs(os.path.join("output_disk0/motion_adaptor_v18", exp_name), exist_ok=True)
-os.makedirs(os.path.join("output_disk0/motion_adaptor_v18", exp_name, "checkpoints"), exist_ok=True)
+model_version = args.version
+os.makedirs(os.path.join(f"output_disk0/motion_adaptor_{model_version}", exp_name), exist_ok=True)
+os.makedirs(os.path.join(f"output_disk0/motion_adaptor_{model_version}", exp_name, "checkpoints"), exist_ok=True)
 
 os.environ["WANDB_MODE"] = "offline"
 
@@ -86,7 +89,7 @@ if local_rank == 0:
             "audio_vocab_size": 16384,
             "motion_vocab_size": 512*2,
             "total_vocab_size": 512*2 + 10,
-            "max_seq_length": 256,
+            "max_seq_length": 512,
             "min_seq_length": 32,
             "batch_size": 256,
             "learning_rate": 1e-4,
@@ -110,7 +113,7 @@ else:
         "audio_vocab_size": 16384,
         "motion_vocab_size": 512*2,
         "total_vocab_size": 512*2 + 10,
-        "max_seq_length": 256,
+        "max_seq_length": 512,
         "min_seq_length": 32,
         "batch_size": 256,
         "learning_rate": 1e-4,
@@ -391,7 +394,7 @@ for epoch in range(start_epoch, config.epochs):
         print(f"Epoch {epoch+1}/{config.epochs} | Loss: {avg_loss:.4f}")
         
         if (epoch + 1) % 50 == 0:
-            ckpt_path = f"output_disk0/motion_adaptor_v18/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
+            ckpt_path = f"output_disk0/motion_adaptor_{model_version}/{config.exp_name}/checkpoints/epoch_{epoch+1}.pt"
             # 在DDP模式下使用model.module，否则直接使用model
             model_to_save = model.module if world_size > 1 else model
             torch.save({
@@ -405,7 +408,7 @@ for epoch in range(start_epoch, config.epochs):
 if local_rank == 0:
     # 在DDP模式下使用model.module，否则直接使用model
     model_to_save = model.module if world_size > 1 else model
-    model_to_save.save_pretrained(f"output_disk0/motion_adaptor_v18/{config.exp_name}")
+    model_to_save.save_pretrained(f"output_disk0/motion_adaptor_{model_version}/{config.exp_name}")
 
 if world_size > 1:
     dist.destroy_process_group()

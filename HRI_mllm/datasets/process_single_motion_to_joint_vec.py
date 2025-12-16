@@ -20,22 +20,25 @@ from HRI_mllm.datasets.fast_fk_brainco import fast_data_pkl_to_vec as data_pkl_t
 # 解析命令行参数
 parser = argparse.ArgumentParser(description='处理motion数据转换为joint_vec')
 parser.add_argument('--input_dir', type=str, 
-                    default="/root/workspace/HRI_MLLM/data/seg_finger_1110",
-                    help='输入数据目录路径')
+                    default="/root/workspace/HRI_MLLM/data/synthetic_data/SG_2_or_3_long_sentence_1023_cn",
+                    help='输入数据目录路径（递归扫描子目录，适配synthetic_data）')
 parser.add_argument('--output_dir', type=str, default=None,
                     help='输出目录路径（默认：输入目录名_joint_vecs）')
 parser.add_argument('--batch_size', type=int, default=8,
                     help='批量处理大小，可以根据GPU内存调整（默认：8）')
+parser.add_argument('--num_gpus', type=int, default=8,
+                    help='使用的GPU数量上限（默认：8，会自动截断为实际可用数）')
+parser.add_argument('--num_threads', type=int, default=16,
+                    help='线程数量（默认：16，建议 >= GPU 数 * 2）')
 args = parser.parse_args()
 
-# 数据集路径
+# 数据集路径（将在运行时按目录动态更新）
 folder_path = args.input_dir
 if args.output_dir is None:
-    # 如果没有指定输出目录，则使用输入目录名加上_joint_vecs后缀
     tgt_dir = folder_path + "_joint_vecs"
 else:
     tgt_dir = args.output_dir
-# 创建3个子目录分别存放npy、json、wav文件
+# 创建3个子目录分别存放npy、json、wav文件（在每次处理目录时更新）
 npy_dir = os.path.join(tgt_dir, "npy")
 json_dir = os.path.join(tgt_dir, "json")
 wav_dir = os.path.join(tgt_dir, "wav")
@@ -44,13 +47,29 @@ wav_dir = os.path.join(tgt_dir, "wav")
 starting_time = None
 
 # 多线程配置
-NUM_GPUS = 8
-NUM_THREADS = 16  # 每个GPU 2个线程
+try:
+    import torch
+    _avail_gpu = torch.cuda.device_count() if torch.cuda.is_available() else 0
+except Exception:
+    _avail_gpu = 0
+
+NUM_GPUS = max(1, min(args.num_gpus, _avail_gpu) if _avail_gpu > 0 else 1)
+NUM_THREADS = max(1, args.num_threads)  # 用户可自定义线程数
 task_queue = Queue()
 success_lock = Lock()
 fail_lock = Lock()
 success_count = 0
 fail_count = 0
+
+
+def format_eta(elapsed_seconds, finished, total):
+    """根据已完成数量估算剩余时间"""
+    if finished <= 0 or total <= 0:
+        return "未知"
+    rate = finished / max(elapsed_seconds, 1e-6)
+    remaining = max(total - finished, 0)
+    eta_seconds = int(remaining / rate) if rate > 0 else -1
+    return str(timedelta(seconds=eta_seconds)).split(".")[0] if eta_seconds >= 0 else "未知"
 
 
 def find_npz_files(root_dir):
@@ -253,8 +272,10 @@ def worker(worker_id, total_num, batch_size):
                     # 每处理100个文件输出一次进度
                     if result_idx % 100 == 0:
                         elapsed = time.time() - starting_time
-                        print(f"进度: {result_idx}/{total_num}, 成功: {success_count}, 失败: {fail_count}, "
-                              f"耗时: {str(timedelta(seconds=int(elapsed))).split('.')[0]}")
+                        finished = success_count + fail_count
+                        eta = format_eta(elapsed, finished, total_num)
+                        print(f"进度: {finished}/{total_num}, 成功: {success_count}, 失败: {fail_count}, "
+                              f"耗时: {str(timedelta(seconds=int(elapsed))).split('.')[0]}, 预计剩余: {eta}")
                 
                 batch = []  # 清空批次
             
@@ -279,54 +300,104 @@ def worker(worker_id, total_num, batch_size):
 
 
 if __name__ == "__main__":
-    starting_time = time.time()
+    def process_directory(source_dir, custom_output_dir=None):
+        """
+        针对指定目录单独生成 joint_vec 结果；会重置全局状态，避免不同子目录混写。
+        """
+        global folder_path, tgt_dir, npy_dir, json_dir, wav_dir
+        global task_queue, success_lock, fail_lock, success_count, fail_count, starting_time
+        
+        folder_path = source_dir
+        if custom_output_dir is None:
+            tgt_dir = folder_path + "_joint_vecs"
+        else:
+            tgt_dir = custom_output_dir
+        npy_dir = os.path.join(tgt_dir, "npy")
+        json_dir = os.path.join(tgt_dir, "json")
+        wav_dir = os.path.join(tgt_dir, "wav")
+        
+        task_queue = Queue()
+        success_lock = Lock()
+        fail_lock = Lock()
+        success_count = 0
+        fail_count = 0
+        starting_time = time.time()
+        
+        # 创建目标目录和子目录
+        os.makedirs(tgt_dir, exist_ok=True)
+        os.makedirs(npy_dir, exist_ok=True)
+        os.makedirs(json_dir, exist_ok=True)
+        os.makedirs(wav_dir, exist_ok=True)
+        
+        # 查找所有npz文件
+        print(f"\n正在处理目录: {folder_path}")
+        print("正在查找所有.npz文件...")
+        npz_files = find_npz_files(folder_path)
+        total_num = len(npz_files)
+        print(f"找到 {total_num} 个.npz文件")
+        
+        if total_num == 0:
+            print("未找到npz文件，跳过该目录。")
+            return
+        
+        # 将所有文件加入任务队列
+        batch_size = args.batch_size
+        print(f"使用 {NUM_GPUS} 个GPU, {NUM_THREADS} 个线程进行处理...")
+        print(f"批量处理大小: {batch_size}")
+        for idx, source_file in enumerate(npz_files, 1):
+            task_queue.put((idx, source_file))
+        
+        # 启动工作线程
+        threads = []
+        for i in range(NUM_THREADS):
+            t = Thread(target=worker, args=(i, total_num, batch_size))
+            t.start()
+            threads.append(t)
+        
+        # 等待所有任务完成
+        task_queue.join()
+        
+        # 发送结束信号给所有线程
+        for _ in range(NUM_THREADS):
+            task_queue.put(None)
+        
+        # 等待所有线程结束
+        for t in threads:
+            t.join()
+        
+        # 输出统计信息
+        elapsed_time = time.time() - starting_time
+        print(f"\n处理完成！")
+        print(f"成功: {success_count} 个文件")
+        print(f"失败: {fail_count} 个文件")
+        print(f"总耗时: {timedelta(seconds=int(elapsed_time))}")
+        print(f"输出目录: {tgt_dir}")
     
-    # 打印配置信息
-    print(f"输入目录: {folder_path}")
-    print(f"输出目录: {tgt_dir}")
+    # 判断输入目录是否直接包含npz；否则对一级子目录逐个处理
+    input_path = Path(args.input_dir)
+    has_npz = len(list(input_path.glob("*.npz"))) > 0
     
-    # 创建目标目录和子目录
-    os.makedirs(tgt_dir, exist_ok=True)
-    os.makedirs(npy_dir, exist_ok=True)
-    os.makedirs(json_dir, exist_ok=True)
-    os.makedirs(wav_dir, exist_ok=True)
-    
-    # 查找所有npz文件
-    print("正在查找所有.npz文件...")
-    npz_files = find_npz_files(folder_path)
-    total_num = len(npz_files)
-    print(f"找到 {total_num} 个.npz文件")
-    
-    # 将所有文件加入任务队列
-    batch_size = args.batch_size
-    print(f"使用 {NUM_GPUS} 个GPU, {NUM_THREADS} 个线程进行处理...")
-    print(f"批量处理大小: {batch_size}")
-    for idx, source_file in enumerate(npz_files, 1):
-        task_queue.put((idx, source_file))
-    
-    # 启动工作线程
-    threads = []
-    for i in range(NUM_THREADS):
-        t = Thread(target=worker, args=(i, total_num, batch_size))
-        t.start()
-        threads.append(t)
-    
-    # 等待所有任务完成
-    task_queue.join()
-    
-    # 发送结束信号给所有线程
-    for _ in range(NUM_THREADS):
-        task_queue.put(None)
-    
-    # 等待所有线程结束
-    for t in threads:
-        t.join()
-    
-    # 输出统计信息
-    elapsed_time = time.time() - starting_time
-    print(f"\n处理完成！")
-    print(f"成功: {success_count} 个文件")
-    print(f"失败: {fail_count} 个文件")
-    print(f"总耗时: {timedelta(seconds=int(elapsed_time))}")
-    print(f"输出目录: {tgt_dir}")
+    if has_npz:
+        # 直接处理当前目录
+        process_directory(str(input_path), args.output_dir)
+    else:
+        subdirs = [p for p in input_path.iterdir() if p.is_dir()]
+        if len(subdirs) == 0:
+            print("输入目录下没有npz文件或子目录，退出。")
+        else:
+            processed_any = False
+            for sub in sorted(subdirs):
+                # 判断子目录是否含npz
+                if len(list(sub.rglob("*.npz"))) == 0:
+                    continue
+                processed_any = True
+                if args.output_dir is None:
+                    out_dir = None  # 默认：子目录后缀 _joint_vecs
+                else:
+                    # 在指定输出根目录下为每个子目录创建独立输出
+                    out_dir = os.path.join(args.output_dir, sub.name + "_joint_vecs")
+                process_directory(str(sub), out_dir)
+            
+            if not processed_any:
+                print("未在任何子目录中找到npz文件，退出。")
 
