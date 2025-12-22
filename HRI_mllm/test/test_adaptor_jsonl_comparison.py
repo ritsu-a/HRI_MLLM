@@ -229,14 +229,7 @@ def generate_motion_tokens_free_running(model, audio_tokens, device="cuda", max_
     # 按照训练时的格式：在audio tokens后面添加10个audio_empty_token
     audio_tokens = audio_tokens + [audio_empty_token_id] * 10
     
-    # 限制max_new_tokens，确保生成的序列总长度不超过模型的最大长度
-    # 考虑：audio_tokens + padding + generated_motion_tokens <= max_seq_length
-    estimated_audio_length = len(audio_tokens) + 10  # audio tokens + padding
-    max_allowed_motion_tokens = max(1, max_seq_length - estimated_audio_length - 50)  # 留50个token的余量
-    if max_new_tokens > max_allowed_motion_tokens:
-        print(f"⚠️  Warning: max_new_tokens ({max_new_tokens}) exceeds model capacity. "
-              f"Limiting to {max_allowed_motion_tokens} (model max_seq_length={max_seq_length})")
-        max_new_tokens = max_allowed_motion_tokens
+
     
     generated_motion_tokens = []
     current_seq = []
@@ -414,11 +407,16 @@ def generate_motion_tokens_free_running(model, audio_tokens, device="cuda", max_
 def generate_motion_tokens_teacher_forcing(model, audio_tokens, motion_tokens_gt, device="cuda", enable_model_debug=False):
     """Teacher-forcing模式：使用GT motion tokens构建完整序列，提取模型在每个motion位置的预测
     
+    支持滑动窗口处理超过512的序列
+    
     返回:
         predicted_tokens: 预测的motion tokens列表
         gt_tokens: GT motion tokens列表
     """
     model.eval()
+    
+    # 获取模型的最大序列长度
+    max_seq_length = getattr(model.config, 'n_positions', 512)
     
     gesture_start_token_id = getattr(model.config, 'gesture_start_token_id', 512*2 + 2)
     audio_gesture_start_token_id = getattr(model.config, 'audio_gesture_start_token_id', 512*2 + 3)
@@ -484,47 +482,135 @@ def generate_motion_tokens_teacher_forcing(model, audio_tokens, motion_tokens_gt
     if len(full_sequence) == 0:
         return [], []
     
-    # 使用完整序列进行前向传播，获取每个位置的预测
-    with torch.no_grad():
-        inputs = torch.tensor(full_sequence).unsqueeze(0).to(device)
-        attn_mask = torch.ones_like(inputs)
-        labels = torch.tensor(token_labels).unsqueeze(0).to(device)
+    # 检查序列长度，如果超过max_seq_length，使用滑动窗口处理
+    if len(full_sequence) <= max_seq_length:
+        # 序列长度在限制内，直接处理
+        with torch.no_grad():
+            inputs = torch.tensor(full_sequence).unsqueeze(0).to(device)
+            attn_mask = torch.ones_like(inputs)
+            labels = torch.tensor(token_labels).unsqueeze(0).to(device)
+            
+            # 前向传播
+            output = model(
+                input_data=inputs, 
+                attention_mask=attn_mask, 
+                labels=labels, 
+                label_tokens=None,
+                use_label_prediction_mode=False
+            )
+            
+            # 检查logits是否存在
+            if output.logits is None:
+                raise ValueError("Model output logits is None. This should not happen in teacher-forcing mode.")
+            logits = output.logits[0]  # [seq_len, vocab_size]
+            
+            # 提取motion token位置的预测
+            predicted_tokens = []
+            gt_tokens = []
+            
+            for pos in motion_positions:
+                if pos < logits.shape[0]:
+                    # 使用位置pos的logits来预测该位置的token
+                    pred_logits = logits[pos]
+                    predicted_token = torch.argmax(pred_logits, dim=-1).item()
+                    gt_token = full_sequence[pos]
+                    
+                    # 过滤special token和padding token
+                    if (predicted_token not in special_token_ids and 
+                        gt_token not in special_token_ids and
+                        predicted_token != motion_empty_token_id and
+                        gt_token != motion_empty_token_id):
+                        predicted_tokens.append(predicted_token)
+                        gt_tokens.append(gt_token)
+            
+            return predicted_tokens, gt_tokens
+    else:
+        # 序列长度超过限制，使用滑动窗口处理
+        print(f"⚠️  序列长度 ({len(full_sequence)}) 超过模型最大长度 ({max_seq_length})，使用滑动窗口处理")
         
-        # 前向传播
-        output = model(
-            input_data=inputs, 
-            attention_mask=attn_mask, 
-            labels=labels, 
-            label_tokens=None,
-            use_label_prediction_mode=False
-        )
+        # 滑动窗口参数
+        window_size = max_seq_length
+        overlap_size = max_seq_length // 4  # 25%重叠，确保连续性
+        stride = window_size - overlap_size
         
-        # 检查logits是否存在
-        if output.logits is None:
-            raise ValueError("Model output logits is None. This should not happen in teacher-forcing mode.")
-        logits = output.logits[0]  # [seq_len, vocab_size]
-        
-        # 提取motion token位置的预测
-        # 注意：在GPT模型中，logits[i]是在看到序列[0:i]后，预测位置i的token
-        # 所以对于位置pos的motion token，我们应该使用logits[pos]，因为它已经看到了序列[0:pos]的所有信息
         predicted_tokens = []
         gt_tokens = []
+        processed_positions = set()  # 记录已处理的motion位置，避免重复
         
-        for pos in motion_positions:
-            if pos < logits.shape[0]:
-                # 使用位置pos的logits来预测该位置的token
-                pred_logits = logits[pos]
-                predicted_token = torch.argmax(pred_logits, dim=-1).item()
-                gt_token = full_sequence[pos]
+        with torch.no_grad():
+            start_idx = 0
+            window_idx = 0
+            
+            while start_idx < len(full_sequence):
+                end_idx = min(start_idx + window_size, len(full_sequence))
+                window_sequence = full_sequence[start_idx:end_idx]
+                window_labels = token_labels[start_idx:end_idx]
                 
-                # 过滤special token和padding token
-                if (predicted_token not in special_token_ids and 
-                    gt_token not in special_token_ids and
-                    predicted_token != motion_empty_token_id and
-                    gt_token != motion_empty_token_id):
-                    predicted_tokens.append(predicted_token)
-                    gt_tokens.append(gt_token)
+                # 找到当前窗口内的motion位置（相对于全局序列的位置）
+                window_motion_positions = [
+                    pos for pos in motion_positions 
+                    if start_idx <= pos < end_idx and pos not in processed_positions
+                ]
+                
+                if len(window_motion_positions) == 0:
+                    # 当前窗口没有motion token，跳过
+                    start_idx += stride
+                    window_idx += 1
+                    continue
+                
+                # 处理当前窗口
+                inputs = torch.tensor(window_sequence).unsqueeze(0).to(device)
+                attn_mask = torch.ones_like(inputs)
+                labels = torch.tensor(window_labels).unsqueeze(0).to(device)
+                
+                # 前向传播
+                output = model(
+                    input_data=inputs, 
+                    attention_mask=attn_mask, 
+                    labels=labels, 
+                    label_tokens=None,
+                    use_label_prediction_mode=False
+                )
+                
+                if output.logits is None:
+                    print(f"⚠️  窗口 {window_idx} 的logits为None，跳过")
+                    start_idx += stride
+                    window_idx += 1
+                    continue
+                
+                logits = output.logits[0]  # [window_seq_len, vocab_size]
+                
+                # 提取当前窗口内motion token位置的预测
+                for global_pos in window_motion_positions:
+                    if global_pos in processed_positions:
+                        continue
+                    
+                    # 转换为窗口内的相对位置
+                    local_pos = global_pos - start_idx
+                    
+                    if local_pos < logits.shape[0]:
+                        # 使用位置local_pos的logits来预测该位置的token
+                        pred_logits = logits[local_pos]
+                        predicted_token = torch.argmax(pred_logits, dim=-1).item()
+                        gt_token = full_sequence[global_pos]
+                        
+                        # 过滤special token和padding token
+                        if (predicted_token not in special_token_ids and 
+                            gt_token not in special_token_ids and
+                            predicted_token != motion_empty_token_id and
+                            gt_token != motion_empty_token_id):
+                            predicted_tokens.append(predicted_token)
+                            gt_tokens.append(gt_token)
+                            processed_positions.add(global_pos)
+                
+                # 移动到下一个窗口
+                start_idx += stride
+                window_idx += 1
         
+        print(f"✅ 滑动窗口处理完成，共处理 {window_idx} 个窗口，提取了 {len(predicted_tokens)} 个motion token预测")
+        
+        # 确保预测的tokens和GT tokens按顺序对应
+        # 由于我们按motion_positions的顺序处理，应该已经是按顺序的
         return predicted_tokens, gt_tokens
 
 
@@ -1174,6 +1260,7 @@ def main():
         audio_tokens = sample['audio_tokens']
         motion_tokens_gt = sample['motion_tokens']
         audio_path = sample['audio_path']
+        print(audio_path)
         
         print(f"Audio tokens: {len(audio_tokens)}")
         print(f"Motion tokens (GT): {len(motion_tokens_gt)}")

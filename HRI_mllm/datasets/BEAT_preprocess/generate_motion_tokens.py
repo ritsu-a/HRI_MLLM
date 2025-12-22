@@ -5,6 +5,7 @@ import os
 import torch
 import yaml
 import json
+import random
 from HRI_mllm import ROOT, DATA_ROOT
 from HRI_mllm.model.motion_encoder.vqvae_body_hand import VQVaeBodyHand
 from HRI_mllm.utils.motion_utils.g1ml3d_final import load_normalization_stats
@@ -470,11 +471,39 @@ if __name__ == "__main__":
             
             jsonl_output_file = os.path.join(jsonl_output_dir, jsonl_output_filename)
             
+            # 打乱数据以确保随机划分
+            random.shuffle(jsonl_entries)
+            
+            # 按照9:1的比例划分训练集和测试集
+            total_count = len(jsonl_entries)
+            train_count = int(total_count * 0.9)
+            test_count = total_count - train_count
+            
+            train_entries = jsonl_entries[:train_count]
+            test_entries = jsonl_entries[train_count:]
+            
+            # 保存完整的jsonl文件（原始文件）
             with open(jsonl_output_file, 'w', encoding='utf-8') as f:
                 for entry in jsonl_entries:
                     f.write(json.dumps(entry, ensure_ascii=False) + '\n')
             
             print(f"✅ JSONL file saved: {jsonl_output_file} ({len(jsonl_entries)} entries)")
+            
+            # 保存训练集和测试集
+            base_name = jsonl_output_filename.replace('.jsonl', '')
+            train_output_file = os.path.join(jsonl_output_dir, f"{base_name}_train.jsonl")
+            test_output_file = os.path.join(jsonl_output_dir, f"{base_name}_test.jsonl")
+            
+            with open(train_output_file, 'w', encoding='utf-8') as f:
+                for entry in train_entries:
+                    f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+            
+            with open(test_output_file, 'w', encoding='utf-8') as f:
+                for entry in test_entries:
+                    f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+            
+            print(f"✅ Train set saved: {train_output_file} ({len(train_entries)} entries, {len(train_entries)/total_count*100:.1f}%)")
+            print(f"✅ Test set saved: {test_output_file} ({len(test_entries)} entries, {len(test_entries)/total_count*100:.1f}%)")
     
     print(f"\n{'='*80}")
     print(f"🎉 All processing completed!")

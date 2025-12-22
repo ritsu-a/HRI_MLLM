@@ -104,27 +104,65 @@ class JSONLAudioMotionDataset(Dataset):
         print(f"Loaded {len(self.samples)} samples from {jsonl_path}")
     
     def apply_sliding_window(self, full_seq, token_types):
+        """
+        应用滑动窗口策略：
+        - 序列长度 < 64: 在序列前补充padding到64（保持history token位置固定）
+        - 序列长度 >= 64: 使用滑动窗口切分成多个64长度的窗口
+        """
         seq_len = len(full_seq)
+        max_seq_length = self.config.max_seq_length  # 64
         
-        if seq_len > self.config.max_seq_length:
-            return
-        
-        sub_seq = full_seq
-        sub_types = token_types
-        
-        mask = [1 if t == 1 else 0 for t in sub_types]
-        
-        padded_seq = sub_seq + [self.SEQ_PAD_TOKEN] * (self.config.max_seq_length - len(sub_seq))
-        padded_mask = mask + [0] * (self.config.max_seq_length - len(mask))
-        
-        self.samples.append({
-            'tokens': torch.tensor(padded_seq),
-            'mask': torch.tensor(padded_mask),
-            'seq_length': len(sub_seq)
-        })
-        
-        self.stats['generated_samples'] += 1
-        self.stats['max_length'] = max(self.stats['max_length'], len(sub_seq))
+        if seq_len < max_seq_length:
+            # 序列长度小于64，在序列前补充padding
+            pad_len = max_seq_length - seq_len
+            padded_seq = [self.SEQ_PAD_TOKEN] * pad_len + full_seq
+            padded_types = [0] * pad_len + token_types  # padding部分token_type为0
+            mask = [1 if t == 1 else 0 for t in padded_types]
+            
+            self.samples.append({
+                'tokens': torch.tensor(padded_seq),
+                'mask': torch.tensor(mask),
+                'seq_length': seq_len  # 实际有效序列长度
+            })
+            
+            self.stats['generated_samples'] += 1
+            self.stats['max_length'] = max(self.stats['max_length'], seq_len)
+        else:
+            # 序列长度 >= 64，使用滑动窗口切分
+            # 使用滑动窗口步长（如果配置了），否则使用窗口大小（不重叠）
+            window_step = getattr(self.config, 'sliding_window_step', max_seq_length)
+            
+            start_idx = 0
+            while start_idx < seq_len:
+                end_idx = min(start_idx + max_seq_length, seq_len)
+                
+                # 提取窗口
+                window_seq = full_seq[start_idx:end_idx]
+                window_types = token_types[start_idx:end_idx]
+                
+                # 如果窗口长度小于max_seq_length，在前面补充padding
+                if len(window_seq) < max_seq_length:
+                    pad_len = max_seq_length - len(window_seq)
+                    window_seq = [self.SEQ_PAD_TOKEN] * pad_len + window_seq
+                    window_types = [0] * pad_len + window_types
+                
+                mask = [1 if t == 1 else 0 for t in window_types]
+                
+                self.samples.append({
+                    'tokens': torch.tensor(window_seq),
+                    'mask': torch.tensor(mask),
+                    'seq_length': end_idx - start_idx  # 实际有效窗口长度
+                })
+                
+                self.stats['generated_samples'] += 1
+                self.stats['max_length'] = max(self.stats['max_length'], end_idx - start_idx)
+                
+                # 移动到下一个窗口
+                start_idx += window_step
+                
+                # 如果剩余长度小于窗口步长，且已经处理了至少一个窗口，可以提前结束
+                if start_idx >= seq_len:
+                    break
     
     def pool_and_concat_samples(self, sep_token):
         """将多个样本合并成一个序列（可选功能）"""
