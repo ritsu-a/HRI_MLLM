@@ -160,3 +160,22 @@ Train on QA data:
 
 Test on QA data:
     bash scripts/quick_test.sh
+
+
+train future prediction model:
+
+
+
+test future prediction model:
+    python HRI_mllm/test/test_future_prediction.py \
+        --jsonl_path /root/workspace/HRI_MLLM/data/synthetic_data/SG_2_or_3_long_sentence_1030_en_joint_vecs/synthetic_data_en_tokens_test.jsonl \
+        --model_checkpoint /root/workspace/HRI_MLLM/output_disk0/motion_adaptor_v21_future_prediction/motion_future_prediction/checkpoints/epoch_30.pt \
+        --vqvae_config g1_vqvae_arbitrary_length_balanced.yaml \
+        --output_dir ./future_prediction_results \
+        --num_samples 50 \
+        --history_audio_frames 25 \
+        --history_motion_frames 25 \
+        --future_motion_frames 14 \
+        --window_step 1 \
+        --temperature 1.0 \
+        --top_k 50

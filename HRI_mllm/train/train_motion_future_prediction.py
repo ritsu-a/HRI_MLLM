@@ -11,7 +11,7 @@ from torch.utils.data.distributed import DistributedSampler
 from transformers import GPT2Config
 import numpy as np
 import os
-import wandb
+# import wandb  # 已禁用wandb
 import math
 from tqdm import tqdm
 from HRI_mllm.datasets.audio_motion_future_prediction_dataset import AudioMotionFuturePredictionDataset
@@ -49,6 +49,8 @@ parser.add_argument('--history_motion_frames', type=int, default=25,
                    help='Number of history motion frames')
 parser.add_argument('--future_motion_frames', type=int, default=14,
                    help='Number of future motion frames to predict')
+parser.add_argument('--max_samples', type=int, default=None,
+                   help='Maximum number of samples to load for debugging (None = load all)')
 args = parser.parse_args()
 
 # ==================== 配置 ====================
@@ -58,7 +60,7 @@ output_dir = f"output_disk0/motion_adaptor_{model_version}/{exp_name}"
 checkpoint_dir = os.path.join(output_dir, "checkpoints")
 os.makedirs(checkpoint_dir, exist_ok=True)
 
-os.environ["WANDB_MODE"] = "offline"
+# os.environ["WANDB_MODE"] = "offline"  # 已禁用wandb
 
 # ==================== 分布式训练设置 ====================
 def setup_distributed():
@@ -112,24 +114,25 @@ class Config:
 config = Config()
 
 # ==================== WandB初始化 ====================
-if local_rank == 0:
-    wandb.init(
-        project="motion-future-prediction",
-        config={
-            "jsonl_files": args.jsonl_files,
-            "val_jsonl_files": args.val_jsonl_files,
-            "history_audio_frames": history_audio_frames,
-            "history_motion_frames": history_motion_frames,
-            "future_motion_frames": future_motion_frames,
-            "max_seq_length": max_seq_length,
-            "batch_size": args.batch_size,
-            "learning_rate": args.learning_rate,
-            "epochs": args.epochs,
-            "weight_decay": args.weight_decay,
-            "dropout": args.dropout,
-            "model_version": model_version,
-        }
-    )
+# 已禁用wandb
+# if local_rank == 0:
+#     wandb.init(
+#         project="motion-future-prediction",
+#         config={
+#             "jsonl_files": args.jsonl_files,
+#             "val_jsonl_files": args.val_jsonl_files,
+#             "history_audio_frames": history_audio_frames,
+#             "history_motion_frames": history_motion_frames,
+#             "future_motion_frames": future_motion_frames,
+#             "max_seq_length": max_seq_length,
+#             "batch_size": args.batch_size,
+#             "learning_rate": args.learning_rate,
+#             "epochs": args.epochs,
+#             "weight_decay": args.weight_decay,
+#             "dropout": args.dropout,
+#             "model_version": model_version,
+#         }
+#     )
 
 # ==================== 创建模型 ====================
 model_config = GPT2Config(
@@ -183,15 +186,16 @@ if world_size > 1:
         find_unused_parameters=True
     )
 
-if local_rank == 0:
-    model_to_watch = model.module if world_size > 1 else model
-    wandb.watch(model_to_watch, log="parameters", log_freq=100)
+# 已禁用wandb
+# if local_rank == 0:
+#     model_to_watch = model.module if world_size > 1 else model
+#     wandb.watch(model_to_watch, log="parameters", log_freq=100)
 
 # ==================== 创建数据集 ====================
 train_datasets = []
 for jsonl_path in args.jsonl_files:
     if os.path.exists(jsonl_path):
-        dataset = AudioMotionFuturePredictionDataset(jsonl_path, config)
+        dataset = AudioMotionFuturePredictionDataset(jsonl_path, config, max_samples=args.max_samples)
         train_datasets.append(dataset)
         if local_rank == 0:
             print(f"Loaded {len(dataset)} training samples from {jsonl_path}")
@@ -218,7 +222,7 @@ if args.val_jsonl_files:
     val_datasets = []
     for jsonl_path in args.val_jsonl_files:
         if os.path.exists(jsonl_path):
-            dataset = AudioMotionFuturePredictionDataset(jsonl_path, config)
+            dataset = AudioMotionFuturePredictionDataset(jsonl_path, config, max_samples=args.max_samples)
             val_datasets.append(dataset)
             if local_rank == 0:
                 print(f"Loaded {len(dataset)} validation samples from {jsonl_path}")
@@ -305,6 +309,7 @@ def validate():
     if val_dataloader is None:
         return None
     
+    # 所有进程都需要参与验证，避免死锁
     model.eval()
     total_val_loss = 0
     num_batches = 0
@@ -370,48 +375,38 @@ for epoch in range(start_epoch, args.epochs):
         total_loss += loss.item()
         
         if local_rank == 0 and (step % 100 == 0 or step == len(train_dataloader) - 1):
-            log_data = {
-                "train/loss": loss.item(),
-                "train/lr": scheduler.get_last_lr()[0],
-                "train/step": epoch * len(train_dataloader) + step,
-            }
-            wandb.log(log_data)
+            # 已禁用wandb
+            # log_data = {
+            #     "train/loss": loss.item(),
+            #     "train/lr": scheduler.get_last_lr()[0],
+            #     "train/step": epoch * len(train_dataloader) + step,
+            # }
+            # wandb.log(log_data)
             if isinstance(dataloader_iter, tqdm):
                 dataloader_iter.set_postfix(loss=loss.item())
     
     if world_size > 1:
         dist.barrier()
     
+    # 验证已禁用，避免卡死问题
+    val_loss = None
+    
     if local_rank == 0:
         avg_train_loss = total_loss / len(train_dataloader)
         
-        # 验证
-        val_loss = None
-        if val_dataloader is not None and ((epoch + 1) % args.val_freq == 0 or epoch == 0 or epoch == args.epochs - 1):
-            val_loss = validate()
+        print(f"Epoch {epoch+1}/{args.epochs} | Train Loss: {avg_train_loss:.4f} | LR: {scheduler.get_last_lr()[0]:.6f}")
         
-        # 记录日志
-        log_data = {
-            "epoch/train_loss": avg_train_loss,
-            "epoch": epoch,
-            "epoch/lr": scheduler.get_last_lr()[0],
-        }
-        if val_loss is not None:
-            log_data["epoch/val_loss"] = val_loss
-        wandb.log(log_data)
+        # 已禁用wandb
+        # log_data = {
+        #     "epoch/train_loss": avg_train_loss,
+        #     "epoch": epoch,
+        #     "epoch/lr": scheduler.get_last_lr()[0],
+        # }
+        # wandb.log(log_data)
         
-        print(f"Epoch {epoch+1}/{args.epochs} | Train Loss: {avg_train_loss:.4f}", end="")
-        if val_loss is not None:
-            print(f" | Val Loss: {val_loss:.4f}", end="")
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                print(f" ✅ (New best!)", end="")
-        print(f" | LR: {scheduler.get_last_lr()[0]:.6f}")
-        
-        # 保存checkpoint
-        if (epoch + 1) % args.save_freq == 0 or val_loss is not None and val_loss < best_val_loss:
+        # 保存checkpoint（仅按频率保存，不基于验证loss）
+        if (epoch + 1) % args.save_freq == 0:
             ckpt_path = os.path.join(checkpoint_dir, f"epoch_{epoch+1}.pt")
-            best_ckpt_path = os.path.join(checkpoint_dir, "best.pt")
             
             model_to_save = model.module if world_size > 1 else model
             checkpoint_data = {
@@ -424,14 +419,17 @@ for epoch in range(start_epoch, args.epochs):
                 'val_loss': val_loss,
             }
             
-            torch.save(checkpoint_data, ckpt_path)
-            if val_loss is not None and val_loss < best_val_loss:
-                torch.save(checkpoint_data, best_ckpt_path)
-                wandb.save(best_ckpt_path)
-                print(f"💾 Saved best checkpoint: {best_ckpt_path}")
-            else:
-                wandb.save(ckpt_path)
+            try:
+                torch.save(checkpoint_data, ckpt_path)
                 print(f"💾 Saved checkpoint: {ckpt_path}")
+                # wandb.save可能卡死，暂时注释
+                # wandb.save(ckpt_path)
+            except Exception as e:
+                print(f"⚠️  Save checkpoint failed: {e}")
+    
+    # 同步所有进程，确保所有操作完成（必须在if块外部）
+    if world_size > 1:
+        dist.barrier()
 
 if local_rank == 0:
     # 保存最终模型

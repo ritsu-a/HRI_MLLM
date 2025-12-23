@@ -5,7 +5,7 @@
 
 torchrun \
   --nproc_per_node=8 \
-  --master_port=29500 \
+  --master_port=29501 \
   HRI_mllm/train/train_motion_future_prediction.py \
   --jsonl_files /root/workspace/HRI_MLLM/data/synthetic_data/SG_2_or_3_long_sentence_1030_en_joint_vecs/synthetic_data_en_tokens_train.jsonl \
   --val_jsonl_files /root/workspace/HRI_MLLM/data/synthetic_data/SG_2_or_3_long_sentence_1030_en_joint_vecs/synthetic_data_en_tokens_test.jsonl \
@@ -35,4 +35,5 @@ torchrun \
 # --history_audio_frames: 历史audio帧数（默认25）
 # --history_motion_frames: 历史motion帧数（默认25）
 # --future_motion_frames: 未来motion帧数（默认14）
+# --max_samples: 最大样本数量（用于调试，None表示加载全部，当前设置为100）
 

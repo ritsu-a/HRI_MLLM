@@ -22,7 +22,7 @@ class AudioMotionFuturePredictionDataset(Dataset):
     总序列长度：64 (25 + 25 + 14)
     """
     
-    def __init__(self, jsonl_path, config):
+    def __init__(self, jsonl_path, config, max_samples=None):
         """
         Args:
             jsonl_path: JSONL文件路径
@@ -33,10 +33,12 @@ class AudioMotionFuturePredictionDataset(Dataset):
                 - history_audio_frames: 历史audio帧数（默认25）
                 - history_motion_frames: 历史motion帧数（默认25）
                 - future_motion_frames: 未来motion帧数（默认14）
+            max_samples: 最大样本数量（用于调试，None表示加载全部）
         """
         self.config = config
         self.jsonl_path = jsonl_path
         self.samples = []
+        self.max_samples = max_samples
         
         # 任务参数
         self.history_audio_frames = getattr(config, 'history_audio_frames', 25)
@@ -58,6 +60,10 @@ class AudioMotionFuturePredictionDataset(Dataset):
         # 读取JSONL文件
         with open(jsonl_path, 'r', encoding='utf-8') as f:
             for line_num, line in enumerate(f):
+                # 如果设置了max_samples，检查是否已达到限制
+                if self.max_samples is not None and len(self.samples) >= self.max_samples:
+                    break
+                
                 try:
                     data = json.loads(line.strip())
                     
@@ -80,14 +86,25 @@ class AudioMotionFuturePredictionDataset(Dataset):
                     if not isinstance(motion_tokens, torch.Tensor):
                         motion_tokens = torch.tensor(motion_tokens)
                     
+                    # 记录添加前的样本数量
+                    samples_before = len(self.samples)
+                    
                     # 应用滑动窗口生成训练样本
                     self._create_samples_from_sequence(audio_tokens, motion_tokens)
+                    
+                    # 如果设置了max_samples，截断到指定数量
+                    if self.max_samples is not None and len(self.samples) > self.max_samples:
+                        self.samples = self.samples[:self.max_samples]
+                        break
                     
                 except Exception as e:
                     print(f"Error processing line {line_num} in {jsonl_path}: {e}")
                     continue
         
-        print(f"Loaded {len(self.samples)} samples from {jsonl_path}")
+        if self.max_samples is not None:
+            print(f"Loaded {len(self.samples)} samples from {jsonl_path} (limited to {self.max_samples} for debugging)")
+        else:
+            print(f"Loaded {len(self.samples)} samples from {jsonl_path}")
     
     def _create_samples_from_sequence(self, audio_tokens, motion_tokens):
         """
@@ -171,6 +188,10 @@ class AudioMotionFuturePredictionDataset(Dataset):
             
             # 创建attention mask：所有位置都是1（没有padding）
             attention_mask = torch.ones(self.max_seq_length, dtype=torch.long)
+            
+            # 如果设置了max_samples，检查是否已达到限制
+            if self.max_samples is not None and len(self.samples) >= self.max_samples:
+                return
             
             self.samples.append({
                 'tokens': sequence,
