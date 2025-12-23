@@ -290,54 +290,37 @@ def predict_future_motion_sliding_window(
             
             # 【已修复】训练时现在使用：[25 audio] + [25 motion_history] + [14 padding] 作为输入
             # labels在future_motion位置有真实token用于计算loss
-            # 这样模型才能真正学习从历史预测未来，而不是"看到答案"再预测
-            #
-            # 测试时有两种方式：
-            # 1. 并行预测（与训练时完全一致）：一次性预测所有tokens，使用padding作为输入
-            # 2. 自回归生成（通常效果更好）：逐步生成，每次利用已生成的tokens作为上下文
-            #
-            # 当前使用自回归生成方式，因为：
-            # - 可以利用之前生成的tokens作为更好的上下文
-            # - 在causal transformer中，由于causal mask，future位置的padding不会影响当前位置预测
-            # - 因此与训练时逻辑一致（都是基于历史context预测）
+            # 测试时与训练时完全一致：一次性预测所有future motion tokens，使用padding作为输入
             
+            # 构建输入序列：[25 audio] + [25 motion] + [14 padding]
+            input_sequence = history_audio + history_motion + [motion_empty_token_id] * future_motion_frames
+            
+            # 创建labels：训练时future_motion位置的labels是真实token ID（用于计算loss）
+            # 测试时我们也用motion_empty_token_id作为占位符，确保这些位置被识别为motion token类型
+            # （模型通过 labels != -100 来判断motion token位置）
+            labels = [-100] * (history_audio_frames + history_motion_frames) + [motion_empty_token_id] * future_motion_frames
+            
+            # 转换为tensor
+            inputs = torch.tensor(input_sequence).unsqueeze(0).to(device).long()
+            labels_tensor = torch.tensor(labels).unsqueeze(0).to(device).long()
+            attention_mask = torch.ones_like(inputs)
+            
+            # 前向传播
+            outputs = model(inputs, labels=labels_tensor, attention_mask=attention_mask)
+            
+            if outputs.logits is None:
+                print(f"⚠️  窗口 {window_idx} 的logits为None，跳过")
+                break
+            
+            # 提取future motion位置的logits
+            logits = outputs.logits[0]  # [seq_len, vocab_size]
+            future_start_idx = history_audio_frames + history_motion_frames
+            future_logits = logits[future_start_idx:future_start_idx + future_motion_frames]  # [14, vocab_size]
+            
+            # 一次性预测所有future motion tokens
             predicted_future_tokens = []
-            
-            # 自回归生成：逐步生成每个future motion token
-            for step in range(future_motion_frames):
-                # 构建当前步骤的输入序列
-                # 前面已生成的部分使用真实tokens，未生成的部分用padding
-                current_future_tokens = predicted_future_tokens + [motion_empty_token_id] * (future_motion_frames - len(predicted_future_tokens))
-                input_sequence = history_audio + history_motion + current_future_tokens
-                
-                # 创建labels：训练时future_motion位置有真实token ID，这里我们用motion_empty_token_id
-                # 这样可以确保模型将这些位置识别为motion token类型（labels != -100 的位置是motion）
-                # 但为了正确预测，我们只需要当前位置的label，其他future位置用-100
-                # 实际上，labels主要用于判断token类型，对于预测来说，我们需要的是logits
-                # 
-                # 关键：模型通过 labels != -100 来判断motion token位置
-                # 训练时：future_motion位置的labels是真实token ID（不是-100），所以被识别为motion
-                # 测试时：我们也应该让future_motion位置被识别为motion，所以labels不应该全是-100
-                # 但如果我们不知道真实值，可以用motion_empty_token_id作为占位符（这样位置会被识别为motion类型）
-                labels = [-100] * (history_audio_frames + history_motion_frames) + [motion_empty_token_id] * future_motion_frames
-                
-                # 转换为tensor
-                inputs = torch.tensor(input_sequence).unsqueeze(0).to(device).long()
-                labels_tensor = torch.tensor(labels).unsqueeze(0).to(device).long()
-                attention_mask = torch.ones_like(inputs)
-                
-                # 前向传播
-                outputs = model(inputs, labels=labels_tensor, attention_mask=attention_mask)
-                
-                if outputs.logits is None:
-                    print(f"⚠️  窗口 {window_idx} 步骤 {step} 的logits为None，跳过")
-                    break
-                
-                # 提取当前位置的logits（future_motion的起始位置 + 当前步骤）
-                logits = outputs.logits[0]  # [seq_len, vocab_size]
-                future_start_idx = history_audio_frames + history_motion_frames
-                current_position = future_start_idx + step
-                token_logits = logits[current_position]  # [vocab_size]
+            for i in range(future_motion_frames):
+                token_logits = future_logits[i]
                 
                 # 排除padding token和special tokens
                 if motion_empty_token_id < token_logits.size(-1):
@@ -373,7 +356,6 @@ def predict_future_motion_sliding_window(
                 if predicted_token < 0 or predicted_token >= 1024:
                     predicted_token = predicted_token % 1024
                 
-                # 将预测的token添加到结果中，并用于下一步的上下文
                 predicted_future_tokens.append(predicted_token)
             
             # 将预测的tokens添加到结果中（根据window_step决定添加多少）
