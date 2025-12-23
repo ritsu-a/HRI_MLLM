@@ -164,11 +164,18 @@ class AudioMotionFuturePredictionDataset(Dataset):
             else:
                 history_audio = audio_tokens[audio_start_idx:audio_end_idx]
             
-            # 构建完整序列：[25 audio] + [25 motion] + [14 future motion]
+            # 【修复】构建完整序列：[25 audio] + [25 motion] + [14 padding]
+            # 重要：future_motion位置应该用padding，而不是真实token！
+            # 这样才能让模型学习从历史预测未来，而不是"看到答案"再预测
+            future_motion_padding = torch.full(
+                (self.future_motion_frames,), 
+                self.motion_empty_token_id, 
+                dtype=motion_tokens.dtype
+            )
             sequence = torch.cat([
                 history_audio,
                 history_motion,
-                future_motion
+                future_motion_padding  # 使用padding而不是真实token
             ])
             
             # 创建token类型mask：0=audio, 1=motion, 2=future_motion（用于loss计算）
@@ -181,9 +188,9 @@ class AudioMotionFuturePredictionDataset(Dataset):
             # 创建labels：
             # - audio位置：-100（不计算loss，模型会识别为audio token）
             # - motion history位置：-100（不计算loss，但模型会识别为motion token，因为token ID不在audio vocab范围内）
-            # - future motion位置：实际的token ID（计算loss）
+            # - future motion位置：实际的token ID（计算loss，但输入序列中是padding）
             labels = torch.full((self.max_seq_length,), -100, dtype=torch.long)
-            # 只有future motion位置有label
+            # 只有future motion位置有label（真实token用于计算loss）
             labels[self.history_audio_frames + self.history_motion_frames:] = future_motion
             
             # 创建attention mask：所有位置都是1（没有padding）
