@@ -132,6 +132,8 @@ def find_original_motion_file(audio_path, dataset_name=None):
             possible_paths.append(os.path.join(DATA_ROOT, "single_motion_for_tokenizer_1108_joint_vecs", "npy", f"{audio_filename}.npy"))
         elif "seg" in dataset_name.lower():
             possible_paths.append(os.path.join(DATA_ROOT, "seg_finger", "new_joint_vecs", f"{audio_filename}.npy"))
+        elif "synthetic" in dataset_name.lower():
+            possible_paths.append(os.path.join(DATA_ROOT, "synthetic_data", "SG_2_or_3_long_sentence_1030_en_joint_vecs", "npy", f"{audio_filename}.npy"))
     
     # 通用路径（按优先级排序）
     possible_paths.extend([
@@ -311,8 +313,16 @@ def main():
                 print(f"⚠️  Sample {idx} (line {line_idx}): No motion tokens found")
                 continue
             
+            # 提取样本名字（从audio_path提取文件名，如果没有则使用索引）
+            sample_name = None
+            if audio_path:
+                sample_name = Path(audio_path).stem  # 获取不带扩展名的文件名
+            else:
+                sample_name = f"sample_{idx}"
+            
             print(f"\n{'='*80}")
             print(f"Sample {idx} (line {line_idx})")
+            print(f"Sample name: {sample_name}")
             print(f"Motion tokens: {len(motion_tokens)} tokens")
             if audio_path:
                 print(f"Audio path: {audio_path}")
@@ -362,6 +372,18 @@ def main():
                     print(f"✅ Comparison video: {comparison_video_path}")
                 else:
                     print(f"⚠️  Original motion file not found for sample {idx}")
+            
+            # 保存样本信息到单独的JSON文件
+            sample_info = {
+                "sample_index": idx,
+                "line_index": line_idx,
+                "sample_name": sample_name,
+                "audio_path": audio_path
+            }
+            sample_info_json_path = os.path.join(sample_output_dir, "sample_info.json")
+            with open(sample_info_json_path, 'w', encoding='utf-8') as f:
+                json.dump(sample_info, f, ensure_ascii=False, indent=2)
+            print(f"✅ Sample info saved to: {sample_info_json_path}")
             
             success_count += 1
             
