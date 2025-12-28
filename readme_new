@@ -69,13 +69,13 @@ Create single motion JSONL with label tokens:
 Visualize JSONL motion:
     # 基础可视化（使用IK优化，默认）
     python HRI_mllm/test/visualize_jsonl_motion.py \
-        --jsonl_path data/single_motion_for_tokenizer_1108_tokens_with_labels_train.jsonl \
+        --jsonl_path /root/workspace/HRI_MLLM/data/synthetic_data/SG_2_or_3_long_sentence_1030_en_joint_vecs/synthetic_data_en_tokens_test.jsonl \
         --vqvae_config g1_vqvae_arbitrary_length_balanced.yaml \
         --vqvae_checkpoint output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt \
-        --num_samples 5 \
+        --num_samples 500 \
         --output_dir jsonl_visualization \
         --compare_with_gt \
-        --dataset_name single_motion_for_tokenizer_1108
+        --dataset_name synthetic_en
 
     # 对比IK优化效果（生成no IK vs with IK的对比视频）
     python HRI_mllm/test/visualize_jsonl_motion.py \
@@ -169,7 +169,7 @@ train future prediction model:
 test future prediction model:
     python HRI_mllm/test/test_future_prediction.py \
         --jsonl_path /root/workspace/HRI_MLLM/data/synthetic_data/SG_2_or_3_long_sentence_1030_en_joint_vecs/synthetic_data_en_tokens_train.jsonl \
-        --model_checkpoint /root/workspace/HRI_MLLM/output_disk0/motion_adaptor_v21_future_prediction/motion_future_prediction/checkpoints/epoch_30.pt \
+        --model_checkpoint /root/workspace/HRI_MLLM/output_disk0/motion_adaptor_v22_future_prediction/checkpoints/epoch_100.pt \
         --vqvae_config g1_vqvae_arbitrary_length_balanced.yaml \
         --output_dir ./future_prediction_results_train \
         --num_samples 50 \
