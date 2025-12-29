@@ -11,7 +11,7 @@ torchrun \
   --jsonl_files /root/workspace/HRI_MLLM/data/synthetic_data/SG_2_or_3_long_sentence_1030_en_joint_vecs/synthetic_data_en_tokens_train.jsonl \
   --val_jsonl_files /root/workspace/HRI_MLLM/data/synthetic_data/SG_2_or_3_long_sentence_1030_en_joint_vecs/synthetic_data_en_tokens_test.jsonl \
   --epochs 1000 \
-  --version v23_future_prediction \
+  --version v24_future_prediction \
   --batch_size 256 \
   --learning_rate 1e-4 \
   --weight_decay 0.01 \

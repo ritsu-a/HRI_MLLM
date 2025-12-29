@@ -23,7 +23,7 @@ class AudioMotionFuturePredictionDataset(Dataset):
     - 50帧future motion token（作为监督）
     
     输入序列长度：128 (3 + 25 + 50 + 50)
-    总序列长度：178 (包含输出监督的50帧)
+    输出监督：最后50个位置（78-128）是future_motion
     """
     
     def __init__(self, jsonl_path, config, max_samples=None):
@@ -50,9 +50,9 @@ class AudioMotionFuturePredictionDataset(Dataset):
         self.past_motion_frames = getattr(config, 'past_motion_frames', 25)
         self.future_audio_frames = getattr(config, 'future_audio_frames', 50)
         self.future_motion_frames = getattr(config, 'future_motion_frames', 50)
-        # 输入序列长度：3 + 25 + 50 + 50 = 128
-        # 总序列长度：3 + 25 + 50 + 50 + 50 = 178（包含输出监督的50帧）
-        self.max_seq_length = self.padding_frames + self.past_motion_frames + self.future_audio_frames + self.future_motion_frames + self.future_motion_frames
+        # 输入序列长度：3 + 25 + 50 + 50 = 128（模型输入序列长度固定为128）
+        # 输出监督：最后50个位置（78-128）是future_motion
+        self.max_seq_length = self.padding_frames + self.past_motion_frames + self.future_audio_frames + self.future_motion_frames  # 128
         
         self.pad_token_id = config.pad_token_id
         self.audio_empty_token_id = config.audio_empty_token_id
@@ -65,8 +65,8 @@ class AudioMotionFuturePredictionDataset(Dataset):
         print(f"  - Future audio frames: {self.future_audio_frames}")
         print(f"  - Future motion padding frames: {self.future_motion_frames}")
         print(f"  - Future motion frames (supervision): {self.future_motion_frames}")
-        print(f"  - Input sequence length: {self.padding_frames + self.past_motion_frames + self.future_audio_frames + self.future_motion_frames}")
-        print(f"  - Total sequence length: {self.max_seq_length}")
+        print(f"  - Input sequence length: {self.max_seq_length}")
+        print(f"  - Output supervision positions: {self.padding_frames + self.past_motion_frames + self.future_audio_frames} to {self.max_seq_length} (last {self.future_motion_frames} positions)")
         
         # 读取JSONL文件
         with open(jsonl_path, 'r', encoding='utf-8') as f:
@@ -122,8 +122,8 @@ class AudioMotionFuturePredictionDataset(Dataset):
         从完整的audio和motion序列创建训练样本
         
         使用滑动窗口策略：
-        - 输入序列：[3*padding] + [25*past_motion] + [50*future_audio] + [50*motion_padding] + [50*future_motion_padding]
-        - 输出监督：只有最后50个future_motion位置有真实token，其他位置都是-100
+        - 输入序列（128长度）：[3*padding] + [25*past_motion] + [50*future_audio] + [50*motion_padding]
+        - 输出监督：只有最后50个位置（78-128）有真实future_motion token，其他位置都是-100
         """
         audio_len = len(audio_tokens)
         motion_len = len(motion_tokens)
@@ -170,29 +170,26 @@ class AudioMotionFuturePredictionDataset(Dataset):
             else:
                 future_audio = audio_tokens[audio_start_idx:audio_end_idx]
             
-            # 构建完整序列：
-            # [3*padding] + [25*past_motion] + [50*future_audio] + [50*future_motion_padding] + [50*future_motion_padding（输出监督位置，输入中是padding）]
-            # 重要：future_motion位置应该用padding，而不是真实token！
+            # 构建完整序列（128长度）：
+            # [3*padding] + [25*past_motion] + [50*future_audio] + [50*future_motion_padding]
+            # 重要：future_motion位置在输入序列中用padding，但在labels中是真实token！
             initial_padding = torch.full((self.padding_frames,), self.pad_token_id, dtype=motion_tokens.dtype)
             future_motion_padding = torch.full((self.future_motion_frames,), self.motion_empty_token_id, dtype=motion_tokens.dtype)
-            # 输出监督位置的padding（输入序列中这部分也是padding）
-            future_motion_supervision_padding = torch.full((self.future_motion_frames,), self.motion_empty_token_id, dtype=motion_tokens.dtype)
             
             sequence = torch.cat([
                 initial_padding,      # 3帧padding
                 past_motion,           # 25帧past motion
                 future_audio,         # 50帧future audio
-                future_motion_padding,  # 50帧future motion padding（输入序列的一部分）
-                future_motion_supervision_padding  # 50帧future motion padding（输出监督位置，输入中也是padding）
+                future_motion_padding,  # 50帧future motion padding（输入序列中这部分是padding，但labels中是真实token）
             ])
             
-            # 创建labels：
-            # - 只有最后50个future_motion位置有真实token（用于计算loss）
+            # 创建labels（128长度）：
+            # - 只有最后50个future_motion位置（78-128）有真实token（用于计算loss）
             # - 其他位置都是-100（不计算loss）
             labels = torch.full((self.max_seq_length,), -100, dtype=torch.long)
-            # 计算future_motion在序列中的起始位置（在最后50个位置）
-            future_motion_start_idx = self.padding_frames + self.past_motion_frames + self.future_audio_frames + self.future_motion_frames
-            labels[future_motion_start_idx:] = future_motion
+            # 计算future_motion在序列中的起始位置（在最后50个位置，即78-128）
+            future_motion_start_idx = self.padding_frames + self.past_motion_frames + self.future_audio_frames  # 78
+            labels[future_motion_start_idx:] = future_motion  # 最后50个位置（78-128）是future_motion
             
             # 创建attention mask：所有位置都是1（没有padding）
             attention_mask = torch.ones(self.max_seq_length, dtype=torch.long)

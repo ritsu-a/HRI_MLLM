@@ -53,6 +53,8 @@ parser.add_argument('--future_motion_frames', type=int, default=50,
                    help='Number of future motion frames to predict (input sequence uses padding, labels use real tokens)')
 parser.add_argument('--max_samples', type=int, default=None,
                    help='Maximum number of samples to load for debugging (None = load all)')
+parser.add_argument('--history_motion_mask_prob', type=float, default=0.3,
+                   help='Probability of masking each history motion token during training (data augmentation)')
 args = parser.parse_args()
 
 # ==================== 配置 ====================
@@ -101,9 +103,15 @@ past_motion_frames = args.past_motion_frames
 future_audio_frames = args.future_audio_frames
 future_motion_frames = args.future_motion_frames
 # 输入序列长度：3*padding + 25*past_motion + 50*future_audio + 50*future_motion_padding = 128
-# 输出序列长度：50*future_motion（作为监督，输入序列中对应位置是padding）
-# 总序列长度：3 + 25 + 50 + 50 + 50 = 178
-max_seq_length = padding_frames + past_motion_frames + future_audio_frames + future_motion_frames + future_motion_frames  # 178
+# 输出序列长度：50*future_motion（作为监督，输入序列中对应位置是padding，labels中最后50个位置是真实token）
+# 模型输入序列长度固定为128
+input_seq_length = padding_frames + past_motion_frames + future_audio_frames + future_motion_frames  # 128
+max_seq_length = input_seq_length  # 128（总序列长度，与输入序列长度一致）
+
+# 数据增强配置
+history_motion_mask_prob = args.history_motion_mask_prob  # 历史motion token的mask概率
+history_motion_start_idx = padding_frames  # 历史motion在序列中的起始位置（3）
+history_motion_end_idx = padding_frames + past_motion_frames  # 历史motion在序列中的结束位置（28）
 
 # 创建配置对象
 class Config:
@@ -115,7 +123,8 @@ class Config:
         self.past_motion_frames = past_motion_frames
         self.future_audio_frames = future_audio_frames
         self.future_motion_frames = future_motion_frames
-        self.max_seq_length = max_seq_length
+        self.input_seq_length = input_seq_length  # 128，模型输入序列长度
+        self.max_seq_length = max_seq_length  # 128，总序列长度（与输入序列长度一致）
         self.window_step = 1  # 滑动窗口步长
 
 config = Config()
@@ -144,7 +153,7 @@ config = Config()
 # ==================== 创建模型 ====================
 model_config = GPT2Config(
     vocab_size=total_vocab_size,
-    n_positions=max_seq_length,
+    n_positions=input_seq_length,  # 128，模型输入序列长度固定为128
     n_embd=768,
     n_layer=12,
     n_head=12,
@@ -244,7 +253,7 @@ if args.val_jsonl_files:
 
 # ==================== Collate函数 ====================
 def collate_fn(batch):
-    """简单的collate函数，因为所有序列长度都是固定的（178）"""
+    """简单的collate函数，因为所有序列长度都是固定的（128）"""
     tokens = torch.stack([item['tokens'] for item in batch]).long()
     labels = torch.stack([item['labels'] for item in batch]).long()
     attention_mask = torch.stack([item['attention_mask'] for item in batch]).long()
@@ -349,9 +358,11 @@ def validate():
 if local_rank == 0:
     print(f"\n🚀 Starting training from epoch {start_epoch} to {args.epochs}")
     print(f"   Task: Predict {future_motion_frames} future motion tokens")
-    print(f"   Input: {padding_frames}*padding + {past_motion_frames}*past_motion + {future_audio_frames}*future_audio + {future_motion_frames}*future_motion_padding = 128")
+    print(f"   Input: {padding_frames}*padding + {past_motion_frames}*past_motion + {future_audio_frames}*future_audio + {future_motion_frames}*future_motion_padding = {input_seq_length}")
     print(f"   Output: {future_motion_frames}*future_motion (supervision)")
-    print(f"   Total sequence length: {max_seq_length}")
+    print(f"   Model input sequence length: {input_seq_length}")
+    print(f"   Total sequence length (dataset): {max_seq_length}")
+    print(f"   Data augmentation: History motion mask probability = {history_motion_mask_prob}")
     print(f"{'='*80}\n")
 
 for epoch in range(start_epoch, args.epochs):
@@ -371,6 +382,16 @@ for epoch in range(start_epoch, args.epochs):
         labels = batch['labels'].to(device, non_blocking=True).long()
         attention_mask = batch['attention_mask'].to(device, non_blocking=True).float()
         
+        # 数据增强：随机mask历史motion token
+        if history_motion_mask_prob > 0:
+            # 为整个batch的history motion部分生成随机mask（向量化操作，更高效）
+            batch_size = inputs.shape[0]
+            history_motion_length = history_motion_end_idx - history_motion_start_idx
+            # 生成随机mask矩阵 [batch_size, history_motion_length]
+            mask = torch.rand(batch_size, history_motion_length, device=device) < history_motion_mask_prob
+            # 将被mask的位置替换为padding token
+            inputs[:, history_motion_start_idx:history_motion_end_idx][mask] = pad_token_id
+        
         outputs = model(inputs, labels=labels, attention_mask=attention_mask)
         loss = outputs.loss
         
@@ -382,16 +403,9 @@ for epoch in range(start_epoch, args.epochs):
         
         total_loss += loss.item()
         
-        if local_rank == 0 and (step % 100 == 0 or step == len(train_dataloader) - 1):
-            # 已禁用wandb
-            # log_data = {
-            #     "train/loss": loss.item(),
-            #     "train/lr": scheduler.get_last_lr()[0],
-            #     "train/step": epoch * len(train_dataloader) + step,
-            # }
-            # wandb.log(log_data)
-            if isinstance(dataloader_iter, tqdm):
-                dataloader_iter.set_postfix(loss=loss.item())
+   
+        if isinstance(dataloader_iter, tqdm):
+            dataloader_iter.set_postfix(loss=loss.item())
     
     if world_size > 1:
         dist.barrier()
