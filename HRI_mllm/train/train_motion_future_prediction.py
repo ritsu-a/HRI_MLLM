@@ -43,12 +43,14 @@ parser.add_argument('--val_freq', type=int, default=10,
                    help='Validation frequency (every N epochs)')
 parser.add_argument('--save_freq', type=int, default=50,
                    help='Save checkpoint frequency (every N epochs)')
-parser.add_argument('--history_audio_frames', type=int, default=25,
-                   help='Number of history audio frames')
-parser.add_argument('--history_motion_frames', type=int, default=25,
-                   help='Number of history motion frames')
-parser.add_argument('--future_motion_frames', type=int, default=14,
-                   help='Number of future motion frames to predict')
+parser.add_argument('--padding_frames', type=int, default=3,
+                   help='Number of initial padding frames')
+parser.add_argument('--past_motion_frames', type=int, default=25,
+                   help='Number of past motion frames')
+parser.add_argument('--future_audio_frames', type=int, default=50,
+                   help='Number of future audio frames')
+parser.add_argument('--future_motion_frames', type=int, default=50,
+                   help='Number of future motion frames to predict (input sequence uses padding, labels use real tokens)')
 parser.add_argument('--max_samples', type=int, default=None,
                    help='Maximum number of samples to load for debugging (None = load all)')
 args = parser.parse_args()
@@ -94,10 +96,14 @@ audio_empty_token_id = 152063  # glm-voice-4的padding token
 motion_empty_token_id = motion_vocab_size + 7
 
 # 任务配置
-history_audio_frames = args.history_audio_frames
-history_motion_frames = args.history_motion_frames
+padding_frames = args.padding_frames
+past_motion_frames = args.past_motion_frames
+future_audio_frames = args.future_audio_frames
 future_motion_frames = args.future_motion_frames
-max_seq_length = history_audio_frames + history_motion_frames + future_motion_frames  # 64
+# 输入序列长度：3*padding + 25*past_motion + 50*future_audio + 50*future_motion_padding = 128
+# 输出序列长度：50*future_motion（作为监督，输入序列中对应位置是padding）
+# 总序列长度：3 + 25 + 50 + 50 + 50 = 178
+max_seq_length = padding_frames + past_motion_frames + future_audio_frames + future_motion_frames + future_motion_frames  # 178
 
 # 创建配置对象
 class Config:
@@ -105,8 +111,9 @@ class Config:
         self.pad_token_id = pad_token_id
         self.audio_empty_token_id = audio_empty_token_id
         self.motion_empty_token_id = motion_empty_token_id
-        self.history_audio_frames = history_audio_frames
-        self.history_motion_frames = history_motion_frames
+        self.padding_frames = padding_frames
+        self.past_motion_frames = past_motion_frames
+        self.future_audio_frames = future_audio_frames
         self.future_motion_frames = future_motion_frames
         self.max_seq_length = max_seq_length
         self.window_step = 1  # 滑动窗口步长
@@ -237,7 +244,7 @@ if args.val_jsonl_files:
 
 # ==================== Collate函数 ====================
 def collate_fn(batch):
-    """简单的collate函数，因为所有序列长度都是64"""
+    """简单的collate函数，因为所有序列长度都是固定的（178）"""
     tokens = torch.stack([item['tokens'] for item in batch]).long()
     labels = torch.stack([item['labels'] for item in batch]).long()
     attention_mask = torch.stack([item['attention_mask'] for item in batch]).long()
@@ -342,7 +349,8 @@ def validate():
 if local_rank == 0:
     print(f"\n🚀 Starting training from epoch {start_epoch} to {args.epochs}")
     print(f"   Task: Predict {future_motion_frames} future motion tokens")
-    print(f"   Input: {history_audio_frames} audio + {history_motion_frames} motion frames")
+    print(f"   Input: {padding_frames}*padding + {past_motion_frames}*past_motion + {future_audio_frames}*future_audio + {future_motion_frames}*future_motion_padding = 128")
+    print(f"   Output: {future_motion_frames}*future_motion (supervision)")
     print(f"   Total sequence length: {max_seq_length}")
     print(f"{'='*80}\n")
 
