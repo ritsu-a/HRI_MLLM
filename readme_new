@@ -168,17 +168,22 @@ train future prediction model:
 
 test future prediction model:
     python HRI_mllm/test/test_future_prediction.py \
-        --jsonl_path /root/workspace/HRI_MLLM/data/synthetic_data/SG_2_or_3_long_sentence_1030_en_joint_vecs/synthetic_data_en_tokens_train.jsonl \
-        --model_checkpoint /root/workspace/HRI_MLLM/output_disk0/motion_adaptor_v22_future_prediction/checkpoints/epoch_100.pt \
+        --jsonl_path /root/workspace/HRI_MLLM/data/synthetic_data/SG_2_or_3_long_sentence_1030_en_joint_vecs/synthetic_data_en_tokens_test.jsonl \
+        --model_checkpoint /root/workspace/HRI_MLLM/output_disk0/motion_adaptor_v23_future_prediction/motion_future_prediction/checkpoints/epoch_180.pt \
         --vqvae_config g1_vqvae_arbitrary_length_balanced.yaml \
-        --output_dir ./future_prediction_results_train \
+        --output_dir ./future_prediction_results_test \
         --num_samples 50 \
-        --history_audio_frames 25 \
-        --history_motion_frames 25 \
-        --future_motion_frames 14 \
-        --window_step 1 \
-        --temperature 1.0 \
-        --top_k 50
+        --padding_frames 3 \
+        --past_motion_frames 25 \
+        --future_audio_frames 50 \
+        --future_motion_frames 50 \
+        --window_step 30 \
+        --temperature 0.0 \
+        --top_k 50 \
+        --enable_filter \
+        --filter_type savgol \
+        --filter_window_length 5 \
+        --filter_polyorder 2
 
 extract motion from npy and json (批量处理模式):
     python extract_motions_from_json_npy.py \

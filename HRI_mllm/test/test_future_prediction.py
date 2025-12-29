@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 """
 测试音频-动作未来预测模型
-任务：根据25帧audio token + 25帧motion token历史，预测14帧future motion token
+任务：根据3*padding + 25*past_motion + 50*future_audio + 50*future_motion_padding，预测50帧future motion token
+
+输入格式与训练时完全一致：
+[3*padding] + [25*past_motion] + [50*future_audio] + [50*future_motion_padding] = 128
 
 使用滑动窗口形式进行预测，并生成视频对比GT和预测结果
 
 使用示例：
     python HRI_mllm/test/test_future_prediction.py \
         --jsonl_path data/synthetic_data/SG_2_or_3_long_sentence_1030_en_joint_vecs/synthetic_data_en_tokens_test.jsonl \
-        --model_checkpoint output_disk0/motion_adaptor_v21_future_prediction/motion_future_prediction/checkpoints/epoch_100.pt \
+        --model_checkpoint output_disk0/motion_adaptor_v23_future_prediction/motion_future_prediction/checkpoints/epoch_100.pt \
         --vqvae_config g1_vqvae_arbitrary_length_balanced.yaml \
         --vqvae_checkpoint output/vqvae_finetune_beat_segfinger/checkpoints/vqvae_finetune_final.pt \
         --output_dir ./future_prediction_results \
         --num_samples 5 \
-        --history_audio_frames 25 \
-        --history_motion_frames 25 \
-        --future_motion_frames 14 \
+        --padding_frames 3 \
+        --past_motion_frames 25 \
+        --future_audio_frames 50 \
+        --future_motion_frames 50 \
         --window_step 1 \
         --temperature 1.0 \
         --top_k 50
@@ -27,12 +31,18 @@
     --vqvae_checkpoint: VQ-VAE checkpoint路径（可选）
     --output_dir: 输出目录
     --num_samples: 测试样本数量
-    --history_audio_frames: 历史audio帧数（默认25）
-    --history_motion_frames: 历史motion帧数（默认25）
-    --future_motion_frames: 未来motion帧数（默认14）
+    --padding_frames: 初始padding帧数（默认3）
+    --past_motion_frames: 历史motion帧数（默认25）
+    --future_audio_frames: 未来audio帧数（默认50）
+    --future_motion_frames: 未来motion帧数（默认50）
     --window_step: 滑动窗口步长（默认1，即每次移动1帧）
     --temperature: 采样温度（默认1.0）
     --top_k: top-k采样（默认50）
+    --enable_filter: 启用qpos平滑滤波，减少突变
+    --filter_type: 滤波类型，'savgol' (Savitzky-Golay) 或 'ema' (指数移动平均，默认: savgol)
+    --filter_window_length: Savitzky-Golay滤波窗口长度（必须是奇数，默认: 5）
+    --filter_polyorder: Savitzky-Golay滤波多项式阶数（默认: 2）
+    --filter_alpha: EMA滤波平滑系数（0-1之间，默认: 0.3）
 """
 
 import os
@@ -48,6 +58,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from scipy.signal import savgol_filter
 
 # Set MuJoCo to use EGL rendering (headless)
 os.environ['MUJOCO_GL'] = 'egl'
@@ -65,6 +76,67 @@ from HRI_mllm.model.gpt2_adaptor.model import MixedInputGPT2
 torch.cuda.set_device(0)
 
 
+def smooth_qpos(qpos_data, filter_type='savgol', window_length=5, polyorder=2, alpha=0.3):
+    """
+    对qpos数据进行平滑滤波，减少突变
+    
+    Args:
+        qpos_data: numpy array, shape [T, D]，qpos数据（时间序列，每行是一帧的qpos）
+        filter_type: 滤波类型，'savgol' (Savitzky-Golay) 或 'ema' (指数移动平均)
+        window_length: Savitzky-Golay滤波的窗口长度（必须是奇数）
+        polyorder: Savitzky-Golay滤波的多项式阶数
+        alpha: EMA滤波的平滑系数（0-1之间，越大越平滑）
+    
+    Returns:
+        smoothed_qpos: 平滑后的qpos数据
+    """
+    if qpos_data.shape[0] < 3:
+        # 如果数据太短，不进行滤波
+        return qpos_data
+    
+    smoothed_qpos = qpos_data.copy()
+    
+    if filter_type == 'savgol':
+        # Savitzky-Golay滤波：平滑且保持特征
+        # 确保window_length是奇数且小于等于数据长度
+        if window_length % 2 == 0:
+            window_length += 1
+        window_length = min(window_length, qpos_data.shape[0])
+        if window_length < 3:
+            window_length = 3
+        
+        # 确保polyorder小于window_length
+        polyorder = min(polyorder, window_length - 1)
+        
+        # 对每一列（每个关节/维度）分别进行滤波
+        for i in range(qpos_data.shape[1]):
+            try:
+                smoothed_qpos[:, i] = savgol_filter(
+                    qpos_data[:, i], 
+                    window_length=window_length, 
+                    polyorder=polyorder,
+                    mode='nearest'  # 边界处理：使用最近值
+                )
+            except:
+                # 如果滤波失败，保持原值
+                smoothed_qpos[:, i] = qpos_data[:, i]
+    
+    elif filter_type == 'ema':
+        # 指数移动平均滤波
+        for i in range(qpos_data.shape[1]):
+            ema = qpos_data[0, i]
+            for t in range(1, qpos_data.shape[0]):
+                ema = alpha * qpos_data[t, i] + (1 - alpha) * ema
+                smoothed_qpos[t, i] = ema
+    
+    else:
+        # 未知的滤波类型，返回原数据
+        print(f"⚠️  未知的滤波类型: {filter_type}，跳过滤波")
+        return qpos_data
+    
+    return smoothed_qpos
+
+
 def load_future_prediction_model(checkpoint_path, device="cuda"):
     """加载训练完成的未来预测模型"""
     print(f"Loading future prediction model from: {checkpoint_path}")
@@ -74,12 +146,16 @@ def load_future_prediction_model(checkpoint_path, device="cuda"):
     print(f"📊 Checkpoint epoch: {epoch}")
     
     # 模型配置（与训练时一致）
+    # 输入序列长度：3*padding + 25*past_motion + 50*future_audio + 50*future_motion_padding = 128
+    # 输出序列长度：50*future_motion（作为监督，输入序列中对应位置是padding）
+    # 总序列长度：3 + 25 + 50 + 50 + 50 = 178
     motion_vocab_size = 512 * 2
     total_vocab_size = motion_vocab_size + 10
+    max_seq_length = 178  # 与训练时一致
     
     model_config = GPT2Config(
         vocab_size=total_vocab_size,
-        n_positions=64,  # 25 + 25 + 14
+        n_positions=max_seq_length,  # 178 = 3 + 25 + 50 + 50 + 50
         n_embd=768,
         n_layer=12,
         n_head=12,
@@ -209,9 +285,10 @@ def predict_future_motion_sliding_window(
     model, 
     audio_tokens, 
     motion_tokens_history,
-    history_audio_frames=25,
-    history_motion_frames=25,
-    future_motion_frames=14,
+    padding_frames=3,
+    past_motion_frames=25,
+    future_audio_frames=50,
+    future_motion_frames=50,
     window_step=1,
     device="cuda",
     temperature=1.0,
@@ -220,13 +297,17 @@ def predict_future_motion_sliding_window(
     """
     使用滑动窗口预测future motion tokens
     
+    输入格式与训练时一致：
+    [3*padding] + [25*past_motion] + [50*future_audio] + [50*future_motion_padding] = 128
+    
     Args:
         model: 未来预测模型
         audio_tokens: 完整的audio tokens序列
         motion_tokens_history: 初始的motion tokens历史（用于第一个窗口）
-        history_audio_frames: 历史audio帧数（默认25）
-        history_motion_frames: 历史motion帧数（默认25）
-        future_motion_frames: 未来motion帧数（默认14）
+        padding_frames: 初始padding帧数（默认3）
+        past_motion_frames: 历史motion帧数（默认25）
+        future_audio_frames: 未来audio帧数（默认50）
+        future_motion_frames: 未来motion帧数（默认50）
         window_step: 滑动窗口步长（默认1，即每次移动1帧）
         device: 计算设备
         temperature: 采样温度
@@ -238,6 +319,7 @@ def predict_future_motion_sliding_window(
     model.eval()
     
     # Token IDs
+    pad_token_id = 512*2 + 1
     audio_empty_token_id = 152063
     motion_empty_token_id = 512*2 + 7
     special_token_ids = {512*2 + 2, 512*2 + 3, 512*2 + 4, 512*2 + 5}
@@ -257,48 +339,59 @@ def predict_future_motion_sliding_window(
     all_predicted_future_tokens = []
     
     # 滑动窗口预测
-    max_audio_idx = audio_len - history_audio_frames
+    # 计算可以预测的窗口数量（包括最后一个不足的窗口）
     window_idx = 0
     
     with torch.no_grad():
         while True:
-            # 计算当前窗口的audio起始位置
+            # 计算当前窗口的audio起始位置（future audio的起始位置）
             audio_start_idx = window_idx * window_step
             
-            if audio_start_idx >= max_audio_idx:
-                break
-            
-            audio_end_idx = min(audio_start_idx + history_audio_frames, audio_len)
-            
-            # 提取audio历史
-            if audio_end_idx - audio_start_idx < history_audio_frames:
-                # 如果audio不足，在前面padding
-                history_audio = [audio_empty_token_id] * history_audio_frames
-                available_audio = audio_tokens_clean[audio_start_idx:audio_end_idx]
-                history_audio[-len(available_audio):] = available_audio
+            # 检查是否已经超出audio范围
+            # 如果audio_start_idx已经超出范围，这是最后一个窗口
+            if audio_start_idx >= audio_len:
+                # 最后一个窗口：audio完全不足，全部用padding
+                available_audio_count = 0
+                future_audio = [audio_empty_token_id] * future_audio_frames
+                is_last_window = True
             else:
-                history_audio = audio_tokens_clean[audio_start_idx:audio_end_idx]
+                audio_end_idx = min(audio_start_idx + future_audio_frames, audio_len)
+                available_audio_count = audio_end_idx - audio_start_idx
+                
+                # 提取future audio（未来audio，用于预测）
+                if available_audio_count < future_audio_frames:
+                    # 如果audio不足，在后面padding（最后一个窗口的情况）
+                    future_audio = [audio_empty_token_id] * future_audio_frames
+                    if available_audio_count > 0:
+                        available_audio = audio_tokens_clean[audio_start_idx:audio_end_idx]
+                        future_audio[:len(available_audio)] = available_audio
+                    # 标记这是最后一个窗口，需要提前截断预测结果
+                    is_last_window = True
+                else:
+                    future_audio = audio_tokens_clean[audio_start_idx:audio_end_idx]
+                    # 检查下一个窗口是否还有足够的audio
+                    next_audio_start = audio_start_idx + window_step
+                    is_last_window = (next_audio_start >= audio_len)
             
-            # 提取motion历史（从缓冲区中取最后history_motion_frames个）
-            if len(motion_history_buffer) >= history_motion_frames:
-                history_motion = motion_history_buffer[-history_motion_frames:]
+            # 提取past motion（历史motion，从缓冲区中取最后past_motion_frames个）
+            if len(motion_history_buffer) >= past_motion_frames:
+                past_motion = motion_history_buffer[-past_motion_frames:]
             else:
                 # 如果motion历史不足，在前面padding
-                history_motion = [motion_empty_token_id] * history_motion_frames
+                past_motion = [motion_empty_token_id] * past_motion_frames
                 available_motion = motion_history_buffer
-                history_motion[-len(available_motion):] = available_motion
+                past_motion[-len(available_motion):] = available_motion
             
-            # 【已修复】训练时现在使用：[25 audio] + [25 motion_history] + [14 padding] 作为输入
-            # labels在future_motion位置有真实token用于计算loss
-            # 测试时与训练时完全一致：一次性预测所有future motion tokens，使用padding作为输入
-            
-            # 构建输入序列：[25 audio] + [25 motion] + [14 padding]
-            input_sequence = history_audio + history_motion + [motion_empty_token_id] * future_motion_frames
+            # 构建输入序列，与训练时完全一致：
+            # [3*padding] + [25*past_motion] + [50*future_audio] + [50*future_motion_padding] = 128
+            initial_padding = [pad_token_id] * padding_frames
+            future_motion_padding = [motion_empty_token_id] * future_motion_frames
+            input_sequence = initial_padding + past_motion + future_audio + future_motion_padding
             
             # 创建labels：训练时future_motion位置的labels是真实token ID（用于计算loss）
             # 测试时我们也用motion_empty_token_id作为占位符，确保这些位置被识别为motion token类型
             # （模型通过 labels != -100 来判断motion token位置）
-            labels = [-100] * (history_audio_frames + history_motion_frames) + [motion_empty_token_id] * future_motion_frames
+            labels = [-100] * (padding_frames + past_motion_frames + future_audio_frames) + [motion_empty_token_id] * future_motion_frames
             
             # 转换为tensor
             inputs = torch.tensor(input_sequence).unsqueeze(0).to(device).long()
@@ -314,8 +407,8 @@ def predict_future_motion_sliding_window(
             
             # 提取future motion位置的logits
             logits = outputs.logits[0]  # [seq_len, vocab_size]
-            future_start_idx = history_audio_frames + history_motion_frames
-            future_logits = logits[future_start_idx:future_start_idx + future_motion_frames]  # [14, vocab_size]
+            future_start_idx = padding_frames + past_motion_frames + future_audio_frames
+            future_logits = logits[future_start_idx:future_start_idx + future_motion_frames]  # [50, vocab_size]
             
             # 一次性预测所有future motion tokens
             predicted_future_tokens = []
@@ -359,9 +452,22 @@ def predict_future_motion_sliding_window(
                 predicted_future_tokens.append(predicted_token)
             
             # 将预测的tokens添加到结果中（根据window_step决定添加多少）
+            # 如果是最后一个窗口且audio不足，需要根据实际可用audio长度来截断预测结果
+            if is_last_window and available_audio_count < future_audio_frames:
+                # 最后一个窗口：根据实际可用的audio长度来截断预测结果
+                # 可以预测的future_motion数量应该与可用的audio数量大致对应
+                # 但为了保守起见，我们至少预测一些tokens（比如至少预测window_step个）
+                max_predicted_frames = max(window_step, min(future_motion_frames, available_audio_count + window_step))
+                predicted_future_tokens = predicted_future_tokens[:max_predicted_frames]
+                print(f"  最后一个窗口（窗口 {window_idx}）：audio不足（{available_audio_count}/{future_audio_frames}），截断预测为 {len(predicted_future_tokens)} 帧")
+            
             if window_step <= future_motion_frames:
                 # 如果步长小于等于预测长度，添加前window_step个tokens
-                tokens_to_add = predicted_future_tokens[:window_step]
+                # 但如果是最后一个窗口，添加所有预测的tokens（因为已经截断了）
+                if is_last_window:
+                    tokens_to_add = predicted_future_tokens
+                else:
+                    tokens_to_add = predicted_future_tokens[:window_step]
                 all_predicted_future_tokens.extend(tokens_to_add)
                 # 更新motion历史缓冲区：添加所有预测的tokens（用于下一个窗口的历史）
                 motion_history_buffer.extend(predicted_future_tokens)
@@ -375,9 +481,13 @@ def predict_future_motion_sliding_window(
                     all_predicted_future_tokens.extend([motion_empty_token_id] * remaining)
                     motion_history_buffer.extend([motion_empty_token_id] * remaining)
             
-            # 保持缓冲区大小合理（只保留最近的历史，至少保留history_motion_frames个）
-            min_buffer_size = history_motion_frames
-            max_buffer_size = history_motion_frames * 3
+            # 如果是最后一个窗口，处理完后退出
+            if is_last_window:
+                break
+            
+            # 保持缓冲区大小合理（只保留最近的历史，至少保留past_motion_frames个）
+            min_buffer_size = past_motion_frames
+            max_buffer_size = past_motion_frames * 3
             if len(motion_history_buffer) > max_buffer_size:
                 motion_history_buffer = motion_history_buffer[-max_buffer_size:]
             elif len(motion_history_buffer) < min_buffer_size:
@@ -552,11 +662,13 @@ def main():
                        help='Output directory for results')
     parser.add_argument('--num_samples', type=int, default=5,
                        help='Number of samples to test')
-    parser.add_argument('--history_audio_frames', type=int, default=25,
-                       help='Number of history audio frames')
-    parser.add_argument('--history_motion_frames', type=int, default=25,
-                       help='Number of history motion frames')
-    parser.add_argument('--future_motion_frames', type=int, default=14,
+    parser.add_argument('--padding_frames', type=int, default=3,
+                       help='Number of initial padding frames')
+    parser.add_argument('--past_motion_frames', type=int, default=25,
+                       help='Number of past motion frames')
+    parser.add_argument('--future_audio_frames', type=int, default=50,
+                       help='Number of future audio frames')
+    parser.add_argument('--future_motion_frames', type=int, default=50,
                        help='Number of future motion frames to predict')
     parser.add_argument('--window_step', type=int, default=1,
                        help='Sliding window step size')
@@ -566,6 +678,17 @@ def main():
                        help='Top-k for sampling')
     parser.add_argument('--random_seed', type=int, default=42,
                        help='Random seed for sampling')
+    parser.add_argument('--enable_filter', action='store_true',
+                       help='Enable qpos smoothing filter to reduce sudden changes')
+    parser.add_argument('--filter_type', type=str, default='savgol',
+                       choices=['savgol', 'ema'],
+                       help='Filter type: savgol (Savitzky-Golay) or ema (Exponential Moving Average)')
+    parser.add_argument('--filter_window_length', type=int, default=5,
+                       help='Savitzky-Golay filter window length (must be odd, default: 5)')
+    parser.add_argument('--filter_polyorder', type=int, default=2,
+                       help='Savitzky-Golay filter polynomial order (default: 2)')
+    parser.add_argument('--filter_alpha', type=float, default=0.3,
+                       help='EMA filter smoothing coefficient (0-1, default: 0.3)')
     
     args = parser.parse_args()
     
@@ -652,15 +775,16 @@ def main():
         # 2. 使用滑动窗口预测future motion tokens
         print("\n--- Predicting Future Motion with Sliding Window ---")
         try:
-            # 使用前history_motion_frames个motion tokens作为初始历史
-            initial_motion_history = motion_tokens_gt[:args.history_motion_frames]
+            # 使用前past_motion_frames个motion tokens作为初始历史
+            initial_motion_history = motion_tokens_gt[:args.past_motion_frames]
             
             predicted_future_tokens = predict_future_motion_sliding_window(
                 future_prediction_model,
                 audio_tokens,
                 initial_motion_history,
-                history_audio_frames=args.history_audio_frames,
-                history_motion_frames=args.history_motion_frames,
+                padding_frames=args.padding_frames,
+                past_motion_frames=args.past_motion_frames,
+                future_audio_frames=args.future_audio_frames,
                 future_motion_frames=args.future_motion_frames,
                 window_step=args.window_step,
                 device="cuda",
@@ -690,6 +814,18 @@ def main():
                     
                     pred_csv_path = os.path.join(sample_dir, "predicted_motion.csv")
                     motion_csv = load_motion_pkl_as_csv_data(pred_pkl_path)
+                    
+                    # 对qpos数据进行平滑滤波，减少突变
+                    if args.enable_filter:
+                        print(f"  应用{args.filter_type}滤波（window_length={args.filter_window_length}, polyorder={args.filter_polyorder}）...")
+                        motion_csv = smooth_qpos(
+                            motion_csv, 
+                            filter_type=args.filter_type,
+                            window_length=args.filter_window_length,
+                            polyorder=args.filter_polyorder,
+                            alpha=args.filter_alpha
+                        )
+                    
                     np.savetxt(pred_csv_path, motion_csv, delimiter=',', fmt='%.8f')
                     print(f"✅ Predicted motion decoded successfully")
         except Exception as e:
