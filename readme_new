@@ -179,3 +179,40 @@ test future prediction model:
         --window_step 1 \
         --temperature 1.0 \
         --top_k 50
+
+extract motion from npy and json (批量处理模式):
+    python extract_motions_from_json_npy.py \
+        --npy_dir /root/workspace/HRI_MLLM/data/synthetic_data/SG_2_or_3_long_sentence_1030_en_joint_vecs/npy \
+        --json_dir /root/workspace/HRI_MLLM/data/synthetic_data/SG_2_or_3_long_sentence_1030_en_joint_vecs/json
+
+extract motion from npy and json (单文件模式):
+    python extract_motions_from_json_npy.py \
+        --npy /root/workspace/HRI_MLLM/data/synthetic_data/SG_2_or_3_long_sentence_1030_en_joint_vecs/npy/1.npy \
+        --json /root/workspace/HRI_MLLM/data/synthetic_data/SG_2_or_3_long_sentence_1030_en_joint_vecs/json/1.json
+
+train motion classifier (准备数据集):
+    cd train_motion_classifier
+    python prepare_dataset.py \
+        --npy_dir /root/workspace/HRI_MLLM/data/synthetic_data/SG_2_or_3_long_sentence_1030_en_joint_vecs/extracted_motions/npy \
+        --output_dir /root/workspace/HRI_MLLM/data/motion_classification_dataset \
+        --test_ratio 0.2
+
+train motion classifier (训练模型):
+    cd train_motion_classifier
+    python train.py \
+        --data_dir /root/workspace/HRI_MLLM/data/motion_classification_dataset \
+        --output_dir /root/workspace/HRI_MLLM/models/motion_classifier \
+        --num_frames 50 \
+        --batch_size 32 \
+        --epochs 50 \
+        --model_type lstm \
+        --use_class_weights
+
+test motion classifier (测试模型):
+    cd train_motion_classifier
+    python test_model.py \
+        --model_path /root/workspace/HRI_MLLM/models/motion_classifier/best_model.pth \
+        --data_dir /root/workspace/HRI_MLLM/data/motion_classification_dataset \
+        --npy_file /root/workspace/HRI_MLLM/data/synthetic_data/SG_2_or_3_long_sentence_1030_en_joint_vecs/extracted_motions/npy/1_motion_3_FOREFINGER_KICK_4.npy \
+        --top_k 5 
+
